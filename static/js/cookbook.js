@@ -10,6 +10,7 @@ import { makeWindowDraggable } from './windowDrag.js';
 import { _diagnose, _showDiagnosis, _clearDiagnosis, _runQuickCmd, ERROR_PATTERNS } from './cookbook-diagnosis.js';
 import { RECIPE_BACKENDS, recipesForBackend, pickRecipe, recipeCommands, RECIPE_DEFAULT_VARIANT } from './cookbook-deps-recipes.js';
 import { _hwfitCache, _hwfitDebounce, _hwfitFetch, _hwfitInit, _hwfitRenderList, _hwfitRenderHw, _renderGpuToggles, _expandModelRow, _fitColors, _hwfitColumns, _cachedModelIds, _gpuToggleTotal, _resetGpuToggleState } from './cookbook-hwfit.js';
+import { initSshServers } from './sshServers.js';
 
 // Sub-modules
 import {
@@ -3273,16 +3274,36 @@ function _renderRecipes() {
   html += '<p class="memory-desc doclib-desc">Configure SSH servers, install Odysseus keys, choose model directories, and set the default server. Local is this machine.</p>';
   html += '<div class="memory-toolbar cookbook-servers-toolbar" style="margin-top:4px;">';
   html += `<div id="cookbook-servers-list">`;
-  for (let i = 0; i < _es.servers.length; i++) {
-    html += _serverEntryHtml(_es.servers[i], i, _es.defaultServer || '', false);
-  }
   html += `</div>`;
+  html += '</div>';
+
+  // ── My servers (owner-scoped saved SSH servers, sshServers.js) ──────
+  html += '<div class="admin-card" id="ssh-servers-card" style="flex:0 0 auto;display:flex;flex-direction:column;">';
+  html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;margin-top:-4px;">';
+  html += '<h2 style="margin:0;padding:0;line-height:1;">My servers</h2>';
+  html += '<span id="ssh-servers-status" style="margin-left:auto;font-size:10px;opacity:0.6;"></span>';
+  html += '</div>';
+  html += '<p class="memory-desc doclib-desc">Your own SSH servers, scoped to your account. Commands run as your remote login user; whether sudo works is decided by the remote host.</p>';
+  html += '<div class="memory-toolbar cookbook-servers-toolbar" style="margin-top:4px;">';
+  html += '<div id="ssh-servers-list"></div>';
+  html += '</div>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:6px;">';
+  html += '<input type="text" class="hwfit-sf" id="ssh-add-label" placeholder="Label" style="width:110px;" />';
+  html += '<input type="text" class="hwfit-sf" id="ssh-add-host" placeholder="host or user@host" style="width:170px;" />';
+  html += '<input type="text" class="hwfit-sf" id="ssh-add-port" placeholder="22" title="SSH port (default 22)" style="width:52px;" />';
+  html += '<input type="text" class="hwfit-sf" id="ssh-add-user" placeholder="user" style="width:100px;" />';
+  html += '<select class="hwfit-sf" id="ssh-add-auth" title="Auth method"><option value="key">key</option><option value="password">password</option><option value="both">both</option></select>';
+  html += '<input type="password" class="memory-search-input" id="ssh-add-pass" placeholder="password (optional)" style="width:170px;height:23px;" />';
+  html += '<input type="password" class="memory-search-input" id="ssh-add-sudo" placeholder="sudo password (optional)" style="width:180px;height:23px;" />';
+  html += '<button type="button" class="memory-toolbar-btn" id="ssh-server-add" title="Save this server" style="height:23px;">Add</button>';
+  html += '</div>';
   html += '</div>';
 
   html += '</div></div>';
 
   body.innerHTML = html;
   _wireTabEvents(body);
+  initSshServers(body);
 
   // Auto-init What Fits
   _hwfitInit();
