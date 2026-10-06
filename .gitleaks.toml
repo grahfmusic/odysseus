@@ -1,0 +1,34 @@
+# gitleaks configuration.
+#
+# gitleaks loads this automatically from the directory it scans and merges it
+# with its built-in ruleset (`useDefault` below), so every default rule stays
+# active. This file only *adds* an allowlist -- it does not replace or disable
+# any rule.
+#
+# Why it exists: THIRD_PARTY_PROVENANCE.json is a machine-generated manifest of
+# vendored third-party assets. Its entries read {"key": "<package>_<version>"},
+# e.g. "bluebird_3.4.7" or "inherits_2.0.1". The `generic-api-key` rule scores
+# those npm version strings as high-entropy credentials and fails the secret-scan
+# job on four of them (commit dab66054, reachable from release/pre-ajax-freeze2).
+# They are package identifiers, not secrets: nothing in that file is sourced from
+# anyone's environment or a credential store.
+#
+# The allowlist is deliberately narrow. It matches only when the *entire* matched
+# secret is "<name>_<major>.<minor>.<patch>" -- the npm provenance-key shape:
+#   - a real credential is unaffected unless it is literally shaped
+#     "<name>_N.N.N" with no other characters (e.g. ghp_..., sk-..., AKIA...,
+#     or any value containing a hyphen, plus sign or extra segment)
+#   - the rule must still match and clear its entropy threshold before this
+#     allowlist is consulted, so the detection logic is unchanged
+#   - every other rule and every other finding is reported exactly as before
+#
+# To re-verify after any change: run `gitleaks git .` and confirm it reports no
+# findings, then plant a random high-entropy value in a scratch repo and confirm
+# it is still reported.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "npm provenance keys (<package>_<version>) in the generated third-party manifest -- package identifiers, not credentials."
+regexes = ['''^[A-Za-z0-9@/._-]+_[0-9]+\.[0-9]+\.[0-9]+$''']
