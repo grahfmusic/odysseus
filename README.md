@@ -46,6 +46,8 @@ ODYSSEUS_IMAGE=ghcr.io/odysseus-dev/odysseus:1.0.2-7c8070f docker compose up -d
 
 Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](website/setup.md).
 
+Prefer one command? `./deploy.sh` runs either the Docker or the native path (and `stop`, `status`, `logs`, `update`) — see [One-command deploy](website/setup.md#one-command-deploy-optional).
+
 ## Features
 
 - **Chat + Agents** — local/API models, tools, MCP, files, shell, skills, and memory.

@@ -21,6 +21,26 @@ Use that for the first login, then change it in **Settings**.
 
 Contributing? See [CONTRIBUTING.md](https://github.com/odysseus-dev/odysseus/blob/dev/CONTRIBUTING.md) for setup, testing, and pull request guidelines.
 
+### One-command deploy (optional)
+`deploy.sh` wraps both paths below behind one idempotent command, so you can switch between them without re-reading either section:
+
+```bash
+./deploy.sh                 # Docker Compose when it is usable, else native
+./deploy.sh --docker        # force Docker Compose
+./deploy.sh --native        # force a native venv + uvicorn install
+./deploy.sh restart         # stop, then deploy again
+./deploy.sh status          # what is running, and whether the UI answers
+./deploy.sh logs            # follow the application log
+./deploy.sh update          # git pull --ff-only, then redeploy
+./deploy.sh stop            # stop it (data is left untouched)
+```
+
+Docker flags: `--optional` (build locally with `INSTALL_OPTIONAL=true`), `--no-build` (start the published image rather than building from the checkout), and `--image REF` (run a pinned tag such as `ghcr.io/odysseus-dev/odysseus:1.0.2-7c8070f`).
+
+Native flags: `--foreground` (stay attached instead of daemonising), `--systemd` (write a unit file and print the install commands), `--with-chromadb` (install a local ChromaDB server), and `--no-chromadb`.
+
+`--dry-run` prints every command instead of running it, and `./deploy.sh --help` lists everything. Re-running is safe: every step is idempotent and nothing in the script deletes data. It never runs `sudo` — where a step needs root it prints the exact command instead.
+
 ### Docker (recommended)
 ```bash
 git clone https://github.com/odysseus-dev/odysseus.git
