@@ -65,7 +65,8 @@ def _run_node(body: str) -> dict:
     script = f"""
 import {{ sshServerPayload, sshTestMessage, sshErrorText, sshServerRowHtml,
         sshServersListHtml, parseSshSse, sshMachineDetailHostHtml,
-        sshMachineInfoHtml, sshAuditRowHtml, sshTransferRequest }} from './sshServers.js';
+        sshMachineInfoHtml, sshAuditRowHtml, sshTransferRequest,
+        sshStatusDot }} from './sshServers.js';
 {body}
 """
     with tempfile.TemporaryDirectory() as td:
@@ -177,6 +178,54 @@ console.log(JSON.stringify([sshServersListHtml([]),
         assert out[0].count("data-ssh-row=") == 0
         assert out[1] is True
         assert out[2] == 2
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+class TestStatusDot:
+    """The per-row status dot promised by ssh-rsh-spec.md §8."""
+
+    def test_the_three_states_are_distinguishable(self):
+        out = _run_node("""
+console.log(JSON.stringify({
+  untested: sshStatusDot({}),
+  nulled: sshStatusDot({ last_test_result: null }),
+  blank: sshStatusDot({ last_test_result: '   ' }),
+  ok: sshStatusDot({ last_test_result: 'ok' }),
+  failed: sshStatusDot({ last_test_result: 'connection timed out' }),
+}));
+""")
+        assert 'data-ssh-status="untested"' in out["untested"]
+        # NULL / blank / whitespace all mean "not tested yet", never "failed".
+        assert 'data-ssh-status="untested"' in out["nulled"]
+        assert 'data-ssh-status="untested"' in out["blank"]
+        assert 'data-ssh-status="ok"' in out["ok"]
+        assert 'data-ssh-status="failed"' in out["failed"]
+        assert "Never tested" in out["untested"]
+        assert "Last test succeeded" in out["ok"]
+        # A failed test carries its reason, which is what makes the dot useful.
+        assert "connection timed out" in out["failed"]
+
+    def test_the_reason_is_escaped_and_bounded_to_a_tooltip(self):
+        """`last_test_result` is server-side display text: it must not inject markup."""
+        out = _run_node("""
+console.log(JSON.stringify(sshStatusDot({
+  last_test_result: '"><img src=x onerror=alert(1)>',
+})));
+""")
+        assert "<img" not in out
+        assert "&lt;img src=x onerror=alert(1)&gt;" in out
+
+    def test_a_never_tested_dot_is_not_a_success(self):
+        """Guards the old bug this replaced: a bare tick that only ever said 'ok'."""
+        out = _run_node("""
+console.log(JSON.stringify([sshServerRowHtml({ id: 's1', label: 'H', host: 'h' }),
+                            sshServerRowHtml({ id: 's2', last_test_result: 'ok' })]));
+""")
+        assert out[0].count('class="ssh-status-dot"') == 1
+        assert 'data-ssh-status="untested"' in out[0]
+        assert out[1].count('class="ssh-status-dot"') == 1
+        assert 'data-ssh-status="ok"' in out[1]
+        assert "\u2713" not in out[0] and "\u2713" not in out[1]
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")

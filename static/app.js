@@ -2806,9 +2806,11 @@ function initializeEventListeners() {
   });
 
   // Esc exits rearrange mode (no matter where focus/mouse is) — matches the
-  // global Esc-cancels-select pattern. Capture phase so a sort dropdown that
-  // happens to be open doesn't swallow it first.
-  document.addEventListener('keydown', (e) => {
+  // global Esc-cancels-select pattern. WINDOW capture: ui.js's global Escape
+  // arbiter is a document-capture listener that closes the hovered window
+  // first, and while rearranging something is always hovered — the tool window
+  // being dragged would close instead of rearrange mode ending.
+  window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!document.body.classList.contains('rearrange-mode')) return;
     e.preventDefault();

@@ -33,11 +33,19 @@ ROOT = Path(__file__).resolve().parents[1]
 UI = ROOT / "static" / "js" / "ui.js"
 COOKBOOK = ROOT / "static" / "js" / "cookbook.js"
 MACHINES = ROOT / "static" / "js" / "machines.js"
+APP = ROOT / "static" / "app.js"
+KEYBOARD_SHORTCUTS = ROOT / "static" / "js" / "keyboard-shortcuts.js"
 
 # (module, bind-once flag belonging to a handler that must win over the arbiter)
 _WINDOW_CAPTURE_HANDLERS = (
     (COOKBOOK, "_cookbookServeEscBound"),
     (MACHINES, "_machinesFormEscBound"),
+)
+
+# The same race, in handlers that have no bind-once flag of their own.
+_WINDOW_CAPTURE_ANCHORS = (
+    (APP, "// Esc exits rearrange mode"),
+    (KEYBOARD_SHORTCUTS, "// \u2500\u2500 Esc cancels select mode"),
 )
 
 
@@ -78,6 +86,20 @@ def test_module_escape_handlers_that_must_win_bind_on_window_capture(path, flag)
     assert "stopImmediatePropagation" in binding, (
         f"{path.name}: must stop the arbiter's window close, not just handle the key"
     )
+
+
+@pytest.mark.parametrize("path,anchor", _WINDOW_CAPTURE_ANCHORS,
+                         ids=[p.name for p, _ in _WINDOW_CAPTURE_ANCHORS])
+def test_the_app_level_escape_handlers_also_bind_on_window_capture(path, anchor):
+    """Rearrange mode and bulk-select cancel have the same race as the two
+    modal handlers above, and the same symptom: the hovered window closes
+    instead of the mode/selection being cancelled."""
+    binding = _registration(_read(path), anchor)
+    assert "window.addEventListener('keydown'" in binding, (
+        f"{path.name}: document capture loses to ui.js's arbiter"
+    )
+    assert "document.addEventListener('keydown'" not in binding
+    assert "stopPropagation" in binding, "must swallow the key it handled"
 
 
 @pytest.mark.parametrize("path,flag", _WINDOW_CAPTURE_HANDLERS,

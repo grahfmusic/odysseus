@@ -36,6 +36,20 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
 
+    # Offline and deterministic: the round path walks budget_context_for_model
+    # -> build_models_url -> resolve_url, which calls getaddrinfo on the
+    # throwaway endpoint host and then shells out to `tailscale status`. On a
+    # host whose resolver stalls on `.test` or single-label names that blocks
+    # for minutes and hangs this file. Same stub the URL-building tests use
+    # ("neutralize resolve_url so tests never touch DNS/Tailscale"); the stubbed
+    # probe result is exactly what an unreachable endpoint yields — no endpoint
+    # report, no known-table hit — so the budget stays conservative as before.
+    from src import endpoint_resolver, model_context
+    monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda u: u, raising=False)
+    monkeypatch.setattr(model_context, "_query_context_length",
+                        lambda url, model: (model_context.DEFAULT_CONTEXT, False),
+                        raising=False)
+
     async def _fake_exec(block, *a, **k):
         return (block.tool_type, {"output": "ok", "exit_code": 0})
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)

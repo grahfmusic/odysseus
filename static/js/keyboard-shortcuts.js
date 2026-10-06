@@ -68,9 +68,11 @@ export function initKeyboardShortcuts(modules) {
   // button is currently visible covers all of them — notes, skills,
   // memory, gallery, sessions, doc library (chats/archive/research/docs),
   // email, cookbook serve — without each module wiring its own listener.
-  // Capture phase + stopPropagation so Esc cancels select instead of
-  // closing the surrounding modal.
-  document.addEventListener('keydown', (e) => {
+  // WINDOW capture + stopPropagation so Esc cancels select instead of closing
+  // the surrounding modal. Document level is not enough: ui.js's global Escape
+  // arbiter is a document-capture listener whose first act is to close the
+  // hovered window, and a select bar only exists inside that hovered window.
+  window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     const cancels = document.querySelectorAll('[id$="-bulk-cancel"]');
     for (const btn of cancels) {

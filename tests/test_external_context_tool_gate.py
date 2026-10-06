@@ -22,6 +22,35 @@ from src.tool_capabilities import (
 ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_loop_env(monkeypatch):
+    """Pin everything ``stream_agent_loop`` would read from the machine.
+
+    This file asserts the injection gate, so the loop must not inherit state
+    from the developer's box:
+
+    * **Skills.** ``stream_agent_loop`` injects the machine's matched skills into
+      the prompt (``SkillsManager(DATA_DIR)``), so a populated ``data/skills/``
+      changed the round these gate tests drove and they failed only on developer
+      machines.
+    * **Endpoint resolution.** The round path also walks
+      ``budget_context_for_model`` -> ``build_models_url`` -> ``resolve_url``,
+      which calls ``getaddrinfo`` on the throwaway endpoint host and then shells
+      out to ``tailscale status``. On a host whose resolver stalls on ``.test``
+      or single-label names that blocks for minutes and hangs this file. Same
+      stub the URL-building tests use; the stubbed probe result is exactly what
+      an unreachable endpoint yields — no endpoint report, no known-table hit.
+    """
+    from services.memory import skills as skills_mod
+    from src import endpoint_resolver, model_context
+    monkeypatch.setattr(skills_mod.SkillsManager, "load",
+                        lambda self, owner=None: [], raising=True)
+    monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda u: u, raising=False)
+    monkeypatch.setattr(model_context, "_query_context_length",
+                        lambda url, model: (model_context.DEFAULT_CONTEXT, False),
+                        raising=False)
+
+
 def _collect_agent_events(generator):
     async def _collect():
         return [chunk async for chunk in generator]

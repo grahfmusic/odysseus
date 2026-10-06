@@ -89,6 +89,41 @@ function _target(s) {
   return `${user}${s.host || ''}:${s.port || 22}`;
 }
 
+/**
+ * Per-row connection indicator (ssh-rsh-spec.md §8: "Rows gain: Test button …, status dot,
+ * Connect … + Run" actions).
+ *
+ * Three states, derived from the row's own `last_test_result` column:
+ *   ok       → green  (the last Test succeeded)
+ *   failed   → red    (the last Test failed; the stored short reason rides in the tooltip)
+ *   untested → grey   (never tested — the default, so an untouched row still reads as one)
+ *
+ * `last_test_result` is a short server-side error string (`core/database.py`: "ok" / error short
+ * string / NULL). It is display text like any other: escape it.
+ */
+export function sshStatusDot(s = {}) {
+  const raw = String(s.last_test_result == null ? '' : s.last_test_result).trim();
+  let state = 'untested';
+  let color = 'var(--fg,#e6e6e6)';
+  let opacity = '0.3';
+  let title = 'Never tested — run Test to pin the host key';
+  if (raw === 'ok') {
+    state = 'ok';
+    color = 'var(--green,#50fa7b)';
+    opacity = '1';
+    title = 'Last test succeeded';
+  } else if (raw) {
+    state = 'failed';
+    color = 'var(--red,#ff5555)';
+    opacity = '1';
+    title = `Last test failed: ${raw}`;
+  }
+  return `<span class="ssh-status-dot" data-ssh-status="${state}" role="img" ` +
+         `title="${esc(title)}" aria-label="${esc(title)}" ` +
+         `style="display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0;` +
+         `background:${color};opacity:${opacity};"></span>`;
+}
+
 /** One server row. All user-controlled fields go through esc(). */
 export function sshServerRowHtml(s = {}) {
   const id = esc(s.id || '');
@@ -101,10 +136,10 @@ export function sshServerRowHtml(s = {}) {
   html += `<div class="ssh-server-row" data-ssh-row="${id}" style="display:flex;flex-direction:column;gap:4px;` +
           `padding:6px 8px;border-radius:6px;background:var(--bg-secondary,rgba(255,255,255,0.03));">`;
   html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">`;
+  html += sshStatusDot(s);
   html += `<span style="font-size:13px;font-weight:600;">${label}</span>`;
   html += `<span style="font-size:11px;opacity:0.75;font-family:var(--mono,monospace);">${esc(_target(s))}</span>`;
   html += `<span class="cookbook-dep-tag" style="font-size:8px;" title="Auth method">${esc(_authLabel(s))}</span>`;
-  if (s.last_test_result === 'ok') html += `<span style="font-size:10px;color:var(--green,#50fa7b);">✓</span>`;
   html += `<span style="margin-left:auto;display:inline-flex;gap:4px;align-items:center;">`;
   html += btn('test', 'Test', 'Open a connection and pin the host key');
   html += btn('connect', 'Connect', 'Open an interactive terminal on this server');
