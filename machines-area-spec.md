@@ -266,9 +266,12 @@ Add a sibling of `#cookbook-modal`, after it (mirror `:1389-1397`):
   it from the workspace, remote path field, run button; fields mirror `TransferRequest` exactly.
 - **Form dialog** (Add/Edit): Label, Host (or `user@host`), Port (default 22), Username, Auth type
   (key/password/both), Password (placeholder "unchanged" on edit), Sudo password (optional),
-  and a key panel: Generate key / Show public key / Copy / `ssh-copy-id -i <path> <user>@<host>` /
-  one-shot `ssh <target> '<cmd>'` line to copy. Secrets are blank-omitted on PATCH (existing
-  `sshServerPayload` behaviour — keep it).
+  and a key panel: Generate key / Show public key / **Install key on machine** / Copy /
+  `ssh-copy-id -i <path> <user>@<host>` / one-shot `ssh <target> '<cmd>'` line to copy. Secrets are
+  blank-omitted on PATCH (existing `sshServerPayload` behaviour — keep it).
+  *Install added later (not in the original spec): the panel only ever showed the `ssh-copy-id` line,
+  which meant a machine that could only authenticate by password could not be set up for key login at
+  all — see `POST /api/ssh/servers/{id}/install-key`.*
 - **Guided empty state**: what a machine is, the user's public key surfaced with a copy button, and a
   prominent "Add your first machine".
 
@@ -293,7 +296,8 @@ Unchanged behaviour, new home: list, add, edit, delete, `Test` (TOFU capture + f
 | Feature | Behaviour | Backing |
 |---|---|---|
 | Connection detail pane | target, auth type, pinned fingerprint, last test result/time | existing `GET /api/ssh/servers` payload |
-| Copy commands | `ssh-copy-id -i <pub> user@host` and a one-shot `ssh user@host 'cmd'` line, copyable | existing `GET …/pubkey` (`ssh_copy_hint`) |
+| Copy commands | `ssh-copy-id -i <pub> user@host` and a one-shot `ssh user@host 'cmd'` line, copyable | existing `GET …/pubkey` (`ssh_copy_hint`, now with the row's real target and port) |
+| Install key | append the user's public key to the remote `~/.ssh/authorized_keys` over SSH (idempotent, 0600/0700); signs in with the saved password, else the key | **new** `POST /api/ssh/servers/{id}/install-key` → `ssh_remote.install_public_key` |
 | File transfer | direction + local/remote path + workspace picker; server confines the local side | existing `POST …/upload` / `…/transfer` |
 | Activity log | own rows (event, machine, time, exit code, command hash prefix, never secrets); admin `scope=all` | **new** read route + existing `SshAuditLog` |
 

@@ -16,6 +16,7 @@ import pytest
 
 from src import ssh_client, ssh_remote
 from tests.helpers.ssh_fixture import has_sftp, ssh_endpoint  # noqa: F401 (fixtures)
+from tests.helpers.paramiko_sshd import paramiko_sshd  # noqa: F401 (fixture)
 
 
 @pytest.fixture
@@ -428,6 +429,96 @@ class TestPinInvalidation:
         srv = ssh_remote.create_server("alice", label="B", host="box", port=22)
         _pin("alice", srv["id"], "SHA256:old")
         assert ssh_remote.update_server("alice", srv["id"], port=2222)["host_key_fingerprint"] is None
+
+
+@pytest.mark.ssh_integration
+class TestPasswordOnlyAgainstParamikoSshd:
+    """The credential path that exists *because* of passwords, end to end.
+
+    The real-sshd fixture below cannot cover it: a non-root sshd cannot read
+    /etc/shadow, so `tests/helpers/ssh_fixture.py` sets PasswordAuthentication
+    no and every login there is carried by a key. That left "add a machine with
+    a password, nothing else" — the shape of the live app's only saved machine —
+    riding on unit tests of ``_resolve_auth`` alone. These run the transport.
+    """
+
+    def _machine(self, endpoint, **over):
+        fields = dict(label="pw", host=endpoint.host, port=endpoint.port,
+                      username=endpoint.username, auth_type="password",
+                      password=endpoint.password)
+        fields.update(over)
+        return ssh_remote.create_server("alice", **fields)
+
+    def test_test_exec_and_terminal_work_with_no_key_at_all(self, ssh_db, paramiko_sshd):
+        endpoint = paramiko_sshd(password="hunter2")
+        srv = self._machine(endpoint)
+        # No keypair exists for this user: the password is the whole credential.
+        assert not ssh_remote.user_key_paths("alice")["private"].exists()
+
+        res = ssh_remote.test_connection("alice", srv["id"])
+        assert res["ok"] is True, res
+        assert res["fingerprint"].startswith("SHA256:")
+
+        out = ssh_remote.exec_one_shot("alice", srv["id"], "echo password-only-ok")
+        assert out["exit_code"] == 0 and "password-only-ok" in out["output"], out
+
+        info = ssh_remote.open_terminal_for("alice", srv["id"])
+        try:
+            assert info["server_id"] == srv["id"]
+        finally:
+            ssh_remote.close_terminal_for("alice", info["session_id"])
+
+    def test_a_wrong_password_fails_rather_than_falling_back(self, ssh_db, paramiko_sshd):
+        endpoint = paramiko_sshd(password="hunter2")
+        srv = self._machine(endpoint, password="wrong")
+        res = ssh_remote.test_connection("alice", srv["id"])
+        assert res["ok"] is False
+        assert "Authentication failed" in res["error"], res
+
+    def test_the_stored_secret_is_never_taken_from_the_row_dict(self, ssh_db, paramiko_sshd):
+        """`resolve_server`/`list_servers` stay secret-free; only `_server_secrets` decrypts."""
+        endpoint = paramiko_sshd(password="hunter2")
+        srv = self._machine(endpoint)
+        assert srv["has_password"] is True
+        assert "password" not in srv and "sudo_password" not in srv
+        assert ssh_remote.resolve_server("alice", srv["id"]).get("password") is None
+
+
+class TestKeyAuthWithAStoredPasswordIsExplained:
+    """The live failure this fixes: Auth `key`, a password on file, no key on the host.
+
+    Reads to the user as "SSH won't connect without a key", and the only thing
+    the remote says is "Permission denied (publickey)" — about a machine whose
+    password is sitting right there, unused.
+    """
+
+    def test_a_missing_key_points_at_the_stored_password(self, ssh_db):
+        srv = ssh_remote.create_server(
+            "alice", label="pluto3", host="pluto3", username="dean",
+            auth_type="key", password="pw")
+        res = ssh_remote.test_connection("alice", srv["id"])
+        assert res["ok"] is False
+        assert "Install key" in res["error"] and "password or both" in res["error"]
+
+    def test_a_rejected_key_rides_a_hint_beside_the_remote_error(self, ssh_db, paramiko_sshd):
+        endpoint = paramiko_sshd(password="hunter2")
+        ssh_remote.generate_user_key("alice")
+        srv = ssh_remote.create_server(
+            "alice", label="pluto3", host=endpoint.host, port=endpoint.port,
+            username=endpoint.username, auth_type="key", password="hunter2")
+        res = ssh_remote.test_connection("alice", srv["id"])
+        assert res["ok"] is False
+        assert "Permission denied" in res["error"], res
+        assert "Install key" in res["hint"]
+
+    def test_no_hint_when_there_is_no_password_to_offer(self, ssh_db, paramiko_sshd):
+        endpoint = paramiko_sshd()
+        ssh_remote.generate_user_key("alice")
+        srv = ssh_remote.create_server(
+            "alice", label="keyonly", host=endpoint.host, port=endpoint.port,
+            username=endpoint.username, auth_type="key")
+        res = ssh_remote.test_connection("alice", srv["id"])
+        assert res["ok"] is False and res["hint"] == ""
 
 
 @pytest.mark.ssh_integration

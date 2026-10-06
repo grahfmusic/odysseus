@@ -66,7 +66,7 @@ def _run_node(body: str) -> dict:
 import {{ sshServerPayload, sshTestMessage, sshErrorText, sshServerRowHtml,
         sshServersListHtml, parseSshSse, sshMachineDetailHostHtml,
         sshMachineInfoHtml, sshAuditRowHtml, sshTransferRequest,
-        sshStatusDot }} from './sshServers.js';
+        sshStatusDot, sshInstallMessage, sshCopyIdHint }} from './sshServers.js';
 {body}
 """
     with tempfile.TemporaryDirectory() as td:
@@ -130,6 +130,15 @@ console.log(JSON.stringify([sshTestMessage({ ok: false, error: 'connection timed
         assert out[1] <= 200
         assert out[2] == "No response" and out[3] == "No response"
 
+    def test_the_servers_hint_rides_along_with_the_error(self):
+        """The reason and the fix are read together: the server owns the hint."""
+        out = _run_node("""
+console.log(JSON.stringify(sshTestMessage({ ok: false, error: 'Permission denied (publickey)',
+                                            hint: 'Install key adds it with that password' })));
+""")
+        assert out == ("Permission denied (publickey) — "
+                       "Install key adds it with that password")
+
     def test_error_text_prefers_fastapi_detail(self):
         out = _run_node("""
 console.log(JSON.stringify([sshErrorText({ detail: 'label is required' }, 400),
@@ -141,6 +150,63 @@ console.log(JSON.stringify([sshErrorText({ detail: 'label is required' }, 400),
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+class TestKeyInstallUi:
+    """The Install button's copy, and the ssh-copy-id line it replaces."""
+
+    def test_install_message_says_what_happened(self):
+        out = _run_node("""
+console.log(JSON.stringify([
+  sshInstallMessage({ ok: true, installed: true, pinned: true }),
+  sshInstallMessage({ ok: true, installed: false, pinned: false }),
+  sshInstallMessage({ ok: false, error: 'Authentication failed', hint: 'check the password' }),
+  sshInstallMessage(null),
+]));
+""")
+        assert "key added" in out[0] and "host key pinned" in out[0]
+        assert "already" in out[1].lower()
+        assert out[2] == "Authentication failed (check the password)"
+        assert out[3] == "No response"
+
+    def test_copy_id_hint_prefers_the_server_command(self):
+        out = _run_node("""
+console.log(JSON.stringify([
+  sshCopyIdHint({ username: 'dean', host: 'pluto3', port: 22 },
+                 { ssh_copy_hint: 'ssh-copy-id -i /data/ssh/dean_ed25519.pub dean@pluto3' }),
+  sshCopyIdHint({ username: 'dean', host: 'pluto3', port: 2222 }, {}),
+  sshCopyIdHint({ host: 'box', port: 22 }, {}),
+]));
+""")
+        assert out[0] == "ssh-copy-id -i /data/ssh/dean_ed25519.pub dean@pluto3"
+        assert out[1] == "ssh-copy-id -i data/ssh/<user>_ed25519 -p 2222 dean@pluto3"
+        assert out[2] == "ssh-copy-id -i data/ssh/<user>_ed25519 box"
+        assert not any("user@host" in s for s in out)
+
+    def test_the_key_pane_offers_install_and_wires_it(self):
+        src = _read(MODULE)
+        key = _func_body(src, "_onKey")
+        assert "ssh-k-install" in key
+        assert "_onInstallKey(" in key
+        install = _func_body(src, "_onInstallKey")
+        # Busy-guard: the call opens an SSH connection and writes a remote file,
+        # so a double-click must not race itself into two appends.
+        assert "btn.disabled = true" in install and "finally" in install
+        assert "installSshKey(" in install
+        assert "refreshSshServers()" in install
+
+    def test_the_api_call_posts_to_the_install_route(self):
+        src = _read(MODULE)
+        body = _func_body(src, "installSshKey")
+        assert "/install-key" in body and "POST" in body
+
+    def test_the_machines_form_offers_install_and_requires_a_saved_machine(self):
+        shell = _read(SHELL)
+        assert 'id="machines-f-installkey"' in shell
+        assert "_el('machines-f-installkey')?.addEventListener('click', _installKey)" in shell
+        body = _func_body(shell, "_installKey")
+        assert "Save the machine first" in body
+        assert "installSshKey(_formState.id)" in body
+
+
 class TestRowHtml:
     def test_hostile_fields_are_escaped(self):
         """A stored label/host must never inject markup into the panel."""

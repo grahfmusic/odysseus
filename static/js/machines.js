@@ -24,7 +24,7 @@ import {
   transferSshFile, listSshAudit, listSshTerminals, closeSshTerminalById,
   disconnectAllTerminals, getLiveTerminals,
   sshServerPayload, sshMachineDetailHostHtml, sshMachineInfoHtml,
-  sshAuditRowHtml,
+  sshAuditRowHtml, sshCopyIdHint, sshInstallMessage, installSshKey,
 } from './sshServers.js';
 
 const esc = uiModule.esc;
@@ -109,11 +109,16 @@ function _formHtml() {
        'style="min-height:58px;font-family:var(--mono,monospace);font-size:10px;line-height:1.35;"></textarea>';
   h += '<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">';
   h += '<button type="button" class="memory-toolbar-btn" id="machines-f-keybtn" style="height:23px;">Show public key</button>';
+  h += '<button type="button" class="memory-toolbar-btn" id="machines-f-installkey" style="height:23px;" ' +
+       'title="Sign in with the saved password or your key, then append the key above to the ' +
+       'machine&#39;s ~/.ssh/authorized_keys">Install key on machine</button>';
   h += '<button type="button" class="memory-toolbar-btn" id="machines-f-copykey" style="height:23px;">Copy key</button>';
   h += '<button type="button" class="memory-toolbar-btn" id="machines-f-copyid" style="height:23px;">Copy ssh-copy-id</button>';
   h += '<button type="button" class="memory-toolbar-btn" id="machines-f-copyrun" style="height:23px;">Copy ssh command</button>';
   h += '</div>';
   h += '<div style="font-size:10px;opacity:0.6;font-family:var(--mono,monospace);" id="machines-f-hint"></div>';
+  h += '<div style="font-size:10px;opacity:0.6;">Install signs in with the saved password when ' +
+       'there is one, otherwise your key, and appends the key on the machine — no copy-paste.</div>';
   h += '</div>';
   h += '</div>';
   return h;
@@ -329,8 +334,10 @@ async function _showCommands() {
     const data = await sshServerPubkey(_formState.id);
     const keyEl = _el('machines-f-key');
     if (keyEl) keyEl.value = String(data.public_key || '');
-    const copyHint = `ssh-copy-id -i ${data.public_path || 'data/ssh/<user>_ed25519'} ` +
-                     `${s?.username || 'user'}@${s?.host || 'host'}`;
+    // One source of truth for the hint: the server builds it from the row's
+    // real target and port (ssh_remote.copy_id_hint). The local fallback covers
+    // an older cached payload.
+    const copyHint = sshCopyIdHint(s || {}, data);
     const runHint = `ssh ${s?.username ? s.username + '@' : ''}${s?.host || 'host'}` +
                     `${s?.port && String(s.port) !== '22' ? ' -p ' + s.port : ''} '<command>'`;
     const hint = _el('machines-f-hint');
@@ -338,6 +345,38 @@ async function _showCommands() {
     _formState.hints = { copyHint, runHint };
   } catch (err) {
     uiModule.showToast('Key unavailable: ' + err.message);
+  }
+}
+
+/**
+ * Install this user's public key on the machine the form is editing.
+ *
+ * Saves the form first when there are unsaved edits to an existing machine?
+ * No — deliberately not: the install talks to the machine the *server* has
+ * stored, so silently persisting a half-typed host would install the key on the
+ * wrong place. The button therefore requires a saved machine, exactly like
+ * `_showCommands`.
+ */
+async function _installKey() {
+  if (!_formState.id) { uiModule.showToast('Save the machine first'); return; }
+  const btn = _el('machines-f-installkey');
+  if (btn && btn.disabled) return;
+  if (btn) btn.disabled = true;
+  const hint = _el('machines-f-hint');
+  try {
+    const res = await installSshKey(_formState.id);
+    const msg = sshInstallMessage(res);
+    uiModule.showToast(msg);
+    if (hint) hint.textContent = msg;
+    if (res && res.ok) {
+      await refreshSshServers();
+      await _render();
+    }
+  } catch (err) {
+    uiModule.showToast('Install failed: ' + err.message);
+    if (hint) hint.textContent = 'Install failed: ' + err.message;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -503,6 +542,7 @@ function _wire() {
   _el('machines-f-cancel')?.addEventListener('click', _closeForm);
   _el('machines-f-close')?.addEventListener('click', _closeForm);
   _el('machines-f-keybtn')?.addEventListener('click', _showCommands);
+  _el('machines-f-installkey')?.addEventListener('click', _installKey);
   _el('machines-f-copykey')?.addEventListener('click', () => _copy(_el('machines-f-key')?.value, 'Public key'));
   _el('machines-f-copyid')?.addEventListener('click', () => _copy(_formState.hints?.copyHint, 'ssh-copy-id command'));
   _el('machines-f-copyrun')?.addEventListener('click', () => _copy(_formState.hints?.runHint, 'ssh command'));

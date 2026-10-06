@@ -191,12 +191,35 @@ def setup_ssh_routes() -> APIRouter:
         from src import ssh_remote as ssh
         owner = _owner(request)
         try:
-            ssh.resolve_server(owner, server_id)
+            srv = ssh.resolve_server(owner, server_id)
         except (LookupError, ValueError):
             raise HTTPException(404, "Server not found")
         info = ssh.generate_user_key(owner)
+        # The hint is a *command to run*, so it names this machine's real target
+        # and port. It used to end in a literal "user@host" placeholder, which
+        # copied into a shell verbatim and went nowhere.
         return {"ok": True, "public_key": info["public_key"],
-                "ssh_copy_hint": f"ssh-copy-id -i {info['public_path']} user@host"}
+                "ssh_copy_hint": ssh.copy_id_hint(srv, info["public_path"]),
+                "target": f"{srv['username']}@{srv['host']}" if srv["username"] else srv["host"],
+                "port": srv["port"]}
+
+    @router.post("/api/ssh/servers/{server_id}/install-key")
+    async def ssh_install_key(request: Request, server_id: str):
+        """Append this user's public key to the server's authorized_keys.
+
+        Returns the install result as data (``ok``/``error``/``hint``) rather
+        than an HTTP error, so the UI can show why it could not sign in — the
+        interesting failures are credential failures, not request failures.
+        """
+        from src import ssh_remote as ssh
+        owner = _owner(request)
+        _check_rate_limit(owner)
+        try:
+            res = await asyncio.to_thread(ssh.install_public_key, owner, server_id)
+        except (LookupError, ValueError) as e:
+            raise HTTPException(404 if isinstance(e, LookupError) else 400,
+                                str(e)[:300])
+        return res
 
     @router.post("/api/ssh/servers/{server_id}/test")
     async def ssh_test(request: Request, server_id: str):

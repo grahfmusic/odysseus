@@ -43,7 +43,11 @@ export function sshTestMessage(res) {
     const fp = res.fingerprint ? ` · ${res.fingerprint}` : '';
     return `OK${ms}${fp}`;
   }
-  return String(res.error || 'Test failed').slice(0, 200);
+  // `hint` is the server's own actionable follow-up (it is the only side that
+  // knows which credentials this machine has, and what to do about a failure);
+  // carried in the message so the reason and the fix are read together.
+  const base = String(res.error || 'Test failed').slice(0, 200);
+  return res.hint ? `${base} — ${String(res.hint).slice(0, 200)}` : base;
 }
 
 /** Pull a message out of a FastAPI error body without leaking the object. */
@@ -82,6 +86,32 @@ function _authLabel(s) {
   if (a === 'password') return 'password (Phase 2)';
   if (a === 'both') return 'key + password';
   return 'key';
+}
+
+/**
+ * A copy-ready ssh-copy-id line. The server sends the authoritative one
+ * (`ssh_copy_hint`, built from the row's real target and port); this mirrors it
+ * for the stale-payload case where the browser cached an older response.
+ */
+export function sshCopyIdHint(s = {}, pub = {}) {
+  if (pub && pub.ssh_copy_hint) return String(pub.ssh_copy_hint);
+  const target = s.username ? `${s.username}@${s.host || ''}` : String(s.host || '');
+  const port = String(s.port || 22);
+  const path = (pub && pub.public_path) || 'data/ssh/<user>_ed25519';
+  return `ssh-copy-id -i ${path}${port !== '22' ? ' -p ' + port : ''} ${target}`;
+}
+
+/** Human-readable one-liner for a key-install result. Never throws on junk. */
+export function sshInstallMessage(res) {
+  if (!res || typeof res !== 'object') return 'No response';
+  if (res.ok) {
+    const extra = res.pinned ? ' — host key pinned' : '';
+    return res.installed
+      ? `Public key added${extra}. Run Test to confirm key login.`
+      : `Public key was already on the machine${extra}.`;
+  }
+  const err = String(res.error || 'Install failed').slice(0, 200);
+  return res.hint ? `${err} (${String(res.hint).slice(0, 200)})` : err;
 }
 
 function _target(s) {
@@ -299,6 +329,15 @@ export function sshServerPubkey(id) {
   return _api(`/${encodeURIComponent(id)}/pubkey`);
 }
 
+/** Append our public key to the machine's authorized_keys (ssh-copy-id, run
+ * server-side). Returns `{ok, installed, pinned, error, hint}`. */
+export function installSshKey(id) {
+  return _api(`/${encodeURIComponent(id)}/install-key`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
 export function runSshCommand(id, cmd, stdin = '', timeout = 30) {
   return _api(`/${encodeURIComponent(id)}/exec`, {
     method: 'POST',
@@ -461,16 +500,21 @@ async function _onKey(id) {
     const data = await sshServerPubkey(id);
     const key = String(data.public_key || '');
     const s = (_servers || []).find(x => x.id === id) || {};
-    const hint = `ssh-copy-id -i ${data.public_path || 'data/ssh/<user>_ed25519'} ${s.username || 'user'}@${s.host || 'host'}`;
+    const hint = sshCopyIdHint(s, data);
     _showDetail(id,
       '<textarea class="memory-search-input ssh-k-key" readonly rows="3" style="min-height:58px;' +
       'font-family:var(--mono,monospace);font-size:10px;line-height:1.35;">' + esc(key) + '</textarea>' +
       '<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">' +
+      '<button type="button" class="memory-toolbar-btn ssh-k-install" style="height:23px;" ' +
+      'title="Sign in with the saved password or your key, then append this key to the ' +
+      'machine\'s ~/.ssh/authorized_keys">Install key on machine</button>' +
       '<button type="button" class="memory-toolbar-btn ssh-k-copy" style="height:23px;">Copy key</button>' +
       '<button type="button" class="memory-toolbar-btn ssh-k-cmd" style="height:23px;">Copy ssh-copy-id</button>' +
       `<button type="button" class="memory-toolbar-btn" data-ssh-action="cancel" data-id="${esc(id)}" style="height:23px;">Close</button>` +
       '</div>' +
-      '<div style="font-size:10px;opacity:0.6;font-family:var(--mono,monospace);">' + esc(hint) + '</div>');
+      '<div style="font-size:10px;opacity:0.6;font-family:var(--mono,monospace);">' + esc(hint) + '</div>' +
+      '<div style="font-size:10px;opacity:0.6;">Install signs in with the saved password when ' +
+      'there is one, otherwise your key — then appends the key above on the machine.</div>');
     const d = _detail(id);
     d.querySelector('.ssh-k-copy')?.addEventListener('click', () => {
       navigator.clipboard?.writeText(key);
@@ -480,10 +524,42 @@ async function _onKey(id) {
       navigator.clipboard?.writeText(hint);
       uiModule.showToast('ssh-copy-id command copied');
     });
+    d.querySelector('.ssh-k-install')?.addEventListener('click', (e) => {
+      _onInstallKey(id, e.currentTarget);
+    });
     _setStatus('');
   } catch (err) {
     _setStatus('Key unavailable');
     uiModule.showToast('Key unavailable: ' + err.message);
+  }
+}
+
+/**
+ * Install the public key on the machine (ssh-copy-id, done server-side).
+ *
+ * Busy-guards the button: the call opens an SSH connection and writes a file on
+ * a remote host, so a double-click must not race itself into two appends.
+ */
+async function _onInstallKey(id, btn) {
+  if (btn && btn.disabled) return;
+  if (btn) btn.disabled = true;
+  _setStatus('Installing key…');
+  try {
+    const res = await installSshKey(id);
+    const msg = sshInstallMessage(res);
+    uiModule.showToast(msg);
+    _setStatus(res && res.ok ? '' : 'Install failed');
+    if (res && res.ok) {
+      // The pin (and `last_test_result`) may have just been recorded, so the
+      // area's derived panes are stale.
+      await refreshSshServers();
+      _notifyChanged('installed');
+    }
+  } catch (err) {
+    _setStatus('Install failed');
+    uiModule.showToast('Install failed: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 

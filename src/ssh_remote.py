@@ -36,6 +36,7 @@ _SSH_PORT_RE = re.compile(r"^\d{1,5}$")
 EXEC_DEFAULT_TIMEOUT = 30
 EXEC_MAX_TIMEOUT = 120
 CONNECT_TIMEOUT = 5
+INSTALL_TIMEOUT = 30
 
 
 def _data_ssh_dir() -> Path:
@@ -136,6 +137,26 @@ def _split_user_host(host: str, username: str = "") -> tuple[str, str]:
     if explicit and explicit != user:
         raise ValueError("specify the login user in Host or Username, not both")
     return bare, user
+
+
+def copy_id_hint(srv: Dict[str, Any], public_path: str) -> str:
+    """A copy-ready ``ssh-copy-id`` line for one saved server.
+
+    Names the server's real target and its port. The placeholder this used to
+    emit — a literal ``user@host`` — was copied into a shell verbatim and could
+    only ever fail, which is one reason the Machines area now installs the key
+    itself (`install_public_key`).
+    """
+    target = f"{srv.get('username')}@{srv['host']}" if srv.get("username") else str(srv.get("host") or "")
+    parts = ["ssh-copy-id", "-i", str(public_path)]
+    try:
+        port = int(srv.get("port") or 22)
+    except (TypeError, ValueError):
+        port = 22
+    if port != 22:
+        parts += ["-p", str(port)]
+    parts.append(target)
+    return " ".join(parts)
 
 
 def _host_allowed(remote: str, port: int) -> bool:
@@ -535,6 +556,23 @@ def _server_secrets(owner: str, server_id: str) -> Dict[str, str]:
         return {"password": row.password or "", "sudo_password": row.sudo_password or ""}
 
 
+def _auth_hint(srv: Dict[str, Any], secrets: Dict[str, str]) -> str:
+    """One actionable line for a failed connection, or "" when there is none.
+
+    The failure users actually hit is a machine saved with Auth ``key`` (the
+    form's default) while a password is also on file: key login is then the only
+    method tried, and the remote's answer — "Permission denied (publickey)" —
+    says nothing about the unused password sitting right there. The hint travels
+    beside ``error`` so the UI can act on it without the error text being
+    rewritten.
+    """
+    if (secrets.get("password") or "") and (srv.get("auth_type") or "key") == "key":
+        return ("this machine has a saved password but Auth is key, so only the key was "
+                "offered — Install key adds it with that password, or set Auth to "
+                "password or both")
+    return ""
+
+
 def _resolve_auth(owner: str, srv: Dict[str, Any], secrets: Dict[str, str],
                   *, force_paramiko: bool = False):
     """Pick a transport for this server. Returns ``(plan, error)``.
@@ -566,6 +604,12 @@ def _resolve_auth(owner: str, srv: Dict[str, Any], secrets: Dict[str, str],
             return {"paramiko": bool(force_paramiko), "password": "", "key_path": key}, ""
         return None, "no password stored and no SSH key for this user — add one"
     if not key.exists():
+        if password:
+            # A key is what Auth ``key`` demands, but the user's password is
+            # already stored and would work under password/both auth.
+            return None, ("no SSH key for this user and Auth is key, though this machine "
+                          "has a saved password — set Auth to password or both, or use "
+                          "Install key to add a key with that password")
         return None, "no SSH key for this user — generate one first"
     if force_paramiko and not srv.get("username"):
         return None, "a username is required for this server"
@@ -601,7 +645,8 @@ def test_connection(owner: str, ref: str) -> Dict[str, Any]:
     plan, auth_err = _resolve_auth(owner, srv, secrets)
     if plan is None:
         audit(owner, srv["id"], "test", "", 1)
-        return {"ok": False, "error": auth_err, "exit_code": 1}
+        return {"ok": False, "error": auth_err, "exit_code": 1,
+                "hint": _auth_hint(srv, secrets)}
     pins = _pins(srv)
 
     if plan["paramiko"]:
@@ -663,7 +708,9 @@ def test_connection(owner: str, ref: str) -> Dict[str, Any]:
     if r.returncode != 0:
         err = ((r.stderr or "").strip() or "ssh test failed")[:300]
         audit(owner, srv["id"], "test", "", r.returncode)
-        return {"ok": False, "error": err, "exit_code": r.returncode, "fingerprint": scanned["fingerprint"]}
+        return {"ok": False, "error": err, "exit_code": r.returncode,
+                "fingerprint": scanned["fingerprint"],
+                "hint": _auth_hint(srv, secrets)}
     _mark_tested(owner, srv["id"], ",".join(scanned["fingerprints"]))
     audit(owner, srv["id"], "test", "", 0)
     return {"ok": True, "fingerprint": scanned["fingerprint"], "latency_ms": ms, "exit_code": 0,
@@ -697,7 +744,7 @@ def exec_one_shot(owner: str, ref: str, cmd: str,
     secrets = _server_secrets(owner, srv["id"])
     plan, auth_err = _resolve_auth(owner, srv, secrets)
     if plan is None:
-        return {"error": auth_err, "exit_code": 1}
+        return {"error": auth_err, "exit_code": 1, "hint": _auth_hint(srv, secrets)}
 
     if plan["paramiko"]:
         from src import ssh_client
@@ -751,6 +798,9 @@ def exec_one_shot(owner: str, ref: str, cmd: str,
            "host": srv["host"], "server_id": srv["id"]}
     if err:
         res["stderr"] = err
+    hint = _auth_hint(srv, secrets)
+    if hint and r.returncode != 0:
+        res["hint"] = hint
     return res
 
 
@@ -859,3 +909,139 @@ def rotate_user_key(owner: str) -> Dict[str, Any]:
     info = generate_user_key(owner, force=True)
     audit(owner, "", "key_rotated", "", 0)
     return info
+
+
+# ---------------------------------------------------------------------------
+# Public-key installation (ssh-copy-id, run from the Machines area)
+# ---------------------------------------------------------------------------
+
+#: Appends the caller's public key to the remote ``~/.ssh/authorized_keys``.
+#:
+#: The key arrives on **stdin**, never in the command line: the remote ``ps``
+#: never shows key material, and no shell-quoting of a key — whose comment is
+#: free text — can go wrong. ``IFS= read -r`` takes the line byte-exact.
+#:
+#: Idempotent (`grep -qxF` makes a re-install a no-op) and it fixes the two
+#: permissions sshd actually requires (0700 directory / 0600 file), which a bare
+#: append would inherit from the remote's umask. ``umask 077`` covers the window
+#: between creating the file and the explicit chmod.
+INSTALL_PUBKEY_COMMAND = """umask 077
+d=\"$HOME/.ssh\"
+mkdir -p \"$d\" || exit 1
+IFS= read -r key
+[ -n \"$key\" ] || { echo 'no public key on stdin' >&2; exit 1; }
+touch \"$d/authorized_keys\" || exit 1
+if grep -qxF -- \"$key\" \"$d/authorized_keys\" 2>/dev/null; then
+  echo already-present
+else
+  printf '%s\\n' \"$key\" >> \"$d/authorized_keys\" || exit 1
+  echo added
+fi
+chmod 700 \"$d\" || exit 1
+chmod 600 \"$d/authorized_keys\" || exit 1
+"""
+
+
+def _pin_after_first_contact(owner: str, srv: Dict[str, Any]) -> bool:
+    """Record TOFU pins for a host we have just successfully reached.
+
+    Best effort by design: a host we reached is reached, so a keyscan that
+    fails afterwards must not fail the action that got there. Returns whether
+    a pin was recorded.
+    """
+    try:
+        fingerprints, lines, _ = _collect_pins(srv["host"], int(srv["port"]))
+        _write_pin_file(srv["id"], lines)
+        _mark_tested(owner, srv["id"], ",".join(fingerprints))
+        return True
+    except Exception as exc:
+        logger.debug("ssh pin after key install failed for %s: %s", srv.get("id"), exc)
+        return False
+
+
+def install_public_key(owner: str, ref: str) -> Dict[str, Any]:
+    """Put this user's public key in a saved server's authorized_keys.
+
+    The one-click equivalent of the ``ssh-copy-id`` line the Machines area has
+    always *shown* (ssh-rsh-spec.md §6.1 key panel). Signs in with the server's
+    **stored password when there is one, otherwise the managed key**.
+
+    Deliberately not gated on ``auth_type``: the whole point of the action is to
+    make key login work, and a machine whose Auth is still ``key`` while a
+    password is on file — the default the form starts on, and the state that
+    reads to a user as "SSH won't connect without a key" — could otherwise never
+    be bootstrapped without editing the machine first. Both credentials are
+    already stored for this machine and the call is explicit, so neither is used
+    behind the user's back; the UI names which one it will try.
+
+    The local ``~/.ssh/authorized_keys`` is never involved — the file is written
+    on the remote, over SSH, and the local sensitive-path deny-list in
+    ``src/tool_execution.py`` is untouched.
+    """
+    srv = resolve_server(owner, ref)
+    remote = f"{srv['username']}@{srv['host']}" if srv["username"] else srv["host"]
+    _require_allowed(remote, int(srv["port"]))
+
+    # Credentials first, keypair second: signing in is what has to work, and a
+    # machine with neither a password nor a key has nothing to sign in with —
+    # saying so beats generating a keypair whose key no host has ever seen and
+    # then reporting the remote's "Authentication failed".
+    secrets = _server_secrets(owner, srv["id"])
+    password = secrets.get("password") or ""
+    key = user_key_paths(owner)["private"]
+    key_path = key if key.exists() else None
+    if not password and key_path is None:
+        return {"ok": False, "exit_code": 1, "error": (
+            "no stored password and no SSH key for this user — add a password to this "
+            "machine, or put a key on the machine by hand and generate one here")}
+
+    try:
+        info = generate_user_key(owner)
+    except RuntimeError as exc:
+        return {"ok": False, "exit_code": 1, "error": str(exc)[:300]}
+    public_key = (info.get("public_key") or "").strip()
+    if not public_key:
+        return {"ok": False, "exit_code": 1,
+                "error": "no public key for this user — generate one first"}
+
+    from src import ssh_client
+    try:
+        r = ssh_client.run_command(
+            srv["host"], int(srv["port"]), srv["username"], INSTALL_PUBKEY_COMMAND,
+            password=password, key_path=key_path, server_id=srv["id"],
+            expected_fingerprints=_pins(srv), timeout=INSTALL_TIMEOUT,
+            stdin_text=public_key + "\n",
+        )
+    except ssh_client.HostKeyChangedError:
+        audit(owner, srv["id"], "key_install", "", 1)
+        return {"ok": False, "exit_code": 1, "error": (
+            "HOST KEY CHANGED — refusing to connect. Verify the server, "
+            "then re-run Test to re-pin.")}
+    except ssh_client.SshClientError as exc:
+        audit(owner, srv["id"], "key_install", "", 1)
+        return {"ok": False, "exit_code": 1, "error": str(exc)[:300], "hint": (
+            "could not sign in — check the saved password, your key, and that the "
+            "remote allows this login method")}
+    except Exception as exc:
+        audit(owner, srv["id"], "key_install", "", 1)
+        return {"ok": False, "exit_code": 1,
+                "error": f"{type(exc).__name__}: {exc}"[:300]}
+
+    code = int(r.get("exit_code") or 0)
+    out = ((r.get("stdout") or "") + (r.get("stderr") or "")).strip()
+    audit(owner, srv["id"], "key_install", "", code)
+    if code != 0:
+        return {"ok": False, "exit_code": code,
+                "error": (out or "could not install the key")[:300]}
+
+    installed = "already-present" not in out
+    pinned = bool(_pins(srv))
+    if not pinned:
+        # Install is also this machine's first successful contact whenever the
+        # user only ever had a password: pin while we are here, or every later
+        # exec/transfer/terminal answers "run Test first".
+        pinned = _pin_after_first_contact(owner, srv)
+    return {"ok": True, "exit_code": 0, "installed": installed, "pinned": pinned,
+            "output": out, "host": srv["host"], "server_id": srv["id"],
+            "message": ("public key added" if installed
+                        else "public key already present on the machine")}
