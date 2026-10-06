@@ -137,6 +137,10 @@ DEFAULT_SETTINGS = {
     # entry is an absolute path. Sensitive subpaths (.ssh, .gnupg, shell
     # rc files, SSH key files) are always blocked regardless of roots.
     "tool_path_extra_roots": [],
+    # Saved-SSH-server host gate (admin-only). [] = any saved host allowed.
+    # Entries are fnmatch globs over "user@host:port" plus CIDR ranges
+    # (matched via ipaddress). Enforced at server-create, test, and exec.
+    "ssh_allowed_host_patterns": [],
     "task_endpoint_id": "",
     "task_model": "",
     "default_endpoint_id": "",

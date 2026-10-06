@@ -30,6 +30,8 @@ Odysseus is designed for **trusted users on a private network**, not public expo
 | Model serving | ✓ | ✗ |
 | Vault | ✓ | ✗ |
 | Settings | ✓ | ✗ |
+| SSH remote execution (own saved servers) | ✓ | ✓ (own only, named tool) |
+| SSH interactive terminal (own saved servers) | ✓ | ✓ (own only) |
 
 Non-admin defaults are in `core/auth.py:DEFAULT_PRIVILEGES`. Tool enforcement is in `src/tool_security.py:NON_ADMIN_BLOCKED_TOOLS`. Any tool whose name starts with `mcp__` is also blocked for non-admins. Admins always get full access regardless of stored privilege values.
 
@@ -50,6 +52,16 @@ Agent tool calls reach admin-gated HTTP routes over an in-process HTTP loopback.
 3. `require_admin` recognises either signal and grants access without checking the session user.
 
 The agent may be running in a non-admin user's session, but tool dispatch first calls `src/tool_security.py:owner_is_admin_or_single_user` to verify the session owner is an admin before issuing any loopback call. Non-admin users cannot invoke admin tools even via the agent.
+
+### SSH remote execution (scoped non-admin capability)
+
+Saved SSH servers (`ssh_servers`, owner-scoped rows in `core/database.py`) let **any authenticated user** run commands on **their own** remote hosts via the named `ssh_exec` tool, the `/api/ssh/*` routes, and an interactive **remote** terminal. This is an intentional, scoped exception to the admin-only shell rule: it grants **remote** execution as the user's own remote login — never local shell. `bash`/`python`, the local PTY (`/api/shell/*`), and scheduled shell actions (`run_local`/`run_script`/`ssh_command`) **stay admin-only**.
+
+Compensating controls (all required): per-owner row isolation (cross-owner use denied), `EncryptedText` secrets, append-only `ssh_audit_log` (command text only as a SHA-256 hash — never secret values), argv-only SSH construction validated by `validate_host`/`validate_port` in `src/ssh_remote.py`, pinned TOFU host fingerprints that fail closed on change, timeouts/output truncation/per-user rate limits, `ssh_exec` blocked in plan mode, remote outputs wrapped as untrusted via `src/prompt_security.py:wrap_untrusted_text`, and the exec/transfer/terminal routes added to the `app_api` blocklist in `src/tools/system.py` so only the named tool and the UI reach them. `sudo` authority stays with the remote host — the app never mints remote privilege. The legacy `rsh` protocol is out of scope and must not be added.
+
+**Password auth, SFTP, and the terminal** (`src/ssh_client.py`, paramiko) extend the same capability to servers that do not accept a key. Additional controls: the password is passed only as a `paramiko` `connect(password=...)` argument — never on a command line and never in the environment (`sshpass` is deliberately not used, because `-p` is visible in `ps` and `-e` in `/proc/<pid>/environ`); the stored host-key pin is enforced **before** authentication, so a credential is never offered to a host that fails its pin, and a server whose host or port is edited has its pin dropped rather than carried over; SFTP transfers are scoped to the same workspace-resolved local path as the SCP path; the terminal is a relayed PTY on a saved server, capped at 3 sessions per user with a 10-minute idle kill, its SSE stream and input channel are *refused* by the generic `app_api` loopback in both directions, and a dropped browser closes the remote session. Terminal sessions live in memory only, so a restart drops them.
+
+**TOFU capture.** `ssh-keyscan` is invoked with an explicit `-t rsa,ecdsa,ed25519` list. Its default probe set now includes smartcard and hybrid ML-DSA types that a normal host key never matches, and it opens one connection per type; OpenSSH ≥ 9.8 counts those against `PerSourcePenalties` and will begin dropping connections from this host — including the app's own. Pinning asks only for the three classic types.
 
 ## Prompt-Injection Hardening
 

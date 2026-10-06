@@ -106,6 +106,9 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "search_hf_models", "list_cached_models",
              "list_serve_presets", "serve_preset", "adopt_served_model",
              "list_cookbook_servers",
+             # Saved SSH servers (general remote shell). Both names must be
+             # present or native calls are rejected before dispatch.
+             "ssh_exec", "list_ssh_servers",
              # Other tools the agent reaches for that were also missing.
              "edit_image", "trigger_research", "manage_research",
              # Generic loopback to any UI-button endpoint (cookbook,

@@ -61,6 +61,25 @@ def _sanitize_label(label: str) -> str:
     return label
 
 
+def wrap_untrusted_text(label: str, content: Any) -> str:
+    """String version of untrusted_context_message for tool-result text.
+
+    Tool outputs re-enter context as role:tool / [Tool execution results]
+    text (never wrapped at dispatch), so producers of remote/untrusted
+    output (e.g. ssh_exec) wrap the text themselves with this helper.
+    """
+    safe_label = _sanitize_label(label)
+    text = "" if content is None else str(content)
+    text = _escape_guard_markers(text)
+    return (
+        f"{UNTRUSTED_CONTEXT_HEADER}\n"
+        f"{GUARD_OPEN}\n"
+        f"Source: {safe_label}\n"
+        f"{text}\n"
+        f"{GUARD_CLOSE}"
+    )
+
+
 def untrusted_context_message(
     label: str,
     content: Any,

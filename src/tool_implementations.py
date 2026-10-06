@@ -1,8 +1,13 @@
 """
 tool_implementations.py
 
-Extracted tool implementation functions (do_* and helpers) from agent_tools.py.
-These handle the actual execution logic for each tool type.
+Compatibility facade over the src/tools/* domain modules (and the admin
+tools in src/agent_tools/admin_tools). Everything is re-exported so existing
+``from src.tool_implementations import X`` imports keep resolving; the
+contract is pinned by tests/test_tool_implementations_shim.py.
+
+Implemented here (not in a domain module): the active-email UI helpers and
+the SSH remote-execution tools (do_ssh_exec, do_list_ssh_servers).
 """
 
 import logging
@@ -18,6 +23,7 @@ from src.tools.system import (  # noqa: F401
     do_manage_skills, _skill_dump, do_manage_tasks,
     do_api_call, do_app_api,
     _APP_API_BLOCKLIST_PREFIXES, _APP_API_BLOCKLIST_METHOD_PATH,
+    _ssh_app_api_blocked,
 )
 # Admin manage_* tools (endpoints/mcp/webhooks/tokens/settings) live in
 # src/agent_tools/admin_tools after the upstream registry migration (#3629).
@@ -113,3 +119,66 @@ def get_active_email() -> Optional[Dict[str, str]]:
 def clear_active_email() -> None:
     global _active_email_ref
     _active_email_ref = None
+
+
+# ---------------------------------------------------------------------------
+# SSH remote execution (owner-scoped saved servers). Implemented here;
+# the app_api guard lives in src/tools/system.py next to the blocklists.
+# ---------------------------------------------------------------------------
+
+
+async def do_ssh_exec(content: str, owner: Optional[str] = None) -> Dict:
+    """Run one command on one of the caller's saved SSH servers.
+
+    Saved-servers-only: `server` is a server id or label (see list_ssh_servers).
+    Raw hosts are never accepted — this bounds SSRF/pivot by construction.
+    Remote output is untrusted: wrapped per prompt-security before return.
+    """
+    from src import ssh_remote as _ssh
+    from src.prompt_security import wrap_untrusted_text
+    try:
+        args = _parse_tool_args(content)
+    except ValueError:
+        return {"error": "Invalid JSON arguments", "exit_code": 1}
+    server = (args.get("server") or "").strip()
+    cmd = args.get("cmd") or ""
+    if not server:
+        return {"error": "server is required (id or label from list_ssh_servers)", "exit_code": 1}
+    if not owner:
+        return {"error": "owner is required", "exit_code": 1}
+    try:
+        res = _ssh.exec_one_shot(owner, server, cmd,
+                                 timeout=args.get("timeout"),
+                                 stdin_text=args.get("stdin") or "")
+    except LookupError as e:
+        return {"error": str(e), "exit_code": 1}
+    except ValueError as e:
+        return {"error": str(e), "exit_code": 1}
+    if "error" in res:
+        return res
+    label = f"ssh {res.get('server_id', '')}"
+    res["output"] = wrap_untrusted_text(label, res.get("output", ""))
+    res["stdout"] = res["output"]
+    if res.get("stderr"):
+        res["stderr"] = wrap_untrusted_text(label, res["stderr"])
+    return res
+
+
+async def do_list_ssh_servers(content: str, owner: Optional[str] = None) -> Dict:
+    """List the caller's saved SSH servers (no secrets). Read-only."""
+    from src import ssh_remote as _ssh
+    if not owner:
+        return {"error": "owner is required", "exit_code": 1}
+    servers = _ssh.list_servers(owner)
+    if not servers:
+        return {"output": "No SSH servers saved. Add one in Cookbook → My servers.",
+                "servers": [], "exit_code": 0}
+    lines = [f"{len(servers)} saved SSH server(s):"]
+    for s in servers:
+        user = f"{s['username']}@" if s.get("username") else ""
+        auth = f" [{s.get('auth_type')}]" if s.get("auth_type") else ""
+        tested = " (tested ok)" if s.get("last_test_result") == "ok" else ""
+        lines.append(f"- {s['label']} → {user}{s['host']}:{s.get('port')}{auth}{tested}")
+    lines.append("\nRefer to a server by its label (or id) in ssh_exec.")
+    return {"output": "\n".join(lines), "servers": servers, "exit_code": 0}
+

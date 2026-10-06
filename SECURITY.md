@@ -21,6 +21,7 @@ Security fixes are handled on the default branch until formal releases are cut.
 - Leave high-risk agent tools restricted to admins: shell, Python, file read/write, email send/read, MCP, app API, task/skill/memory management, settings, tokens, and model serving.
 - Rotate API keys, webhook secrets, and Odysseus API tokens if they appear in logs, screenshots, demos, or shared chats.
 - Treat shell, model-serving, MCP, email, calendar, and vault features as privileged admin functionality.
+- Treat saved SSH servers as personal credentials: users may only reach their own servers, and every test/exec/transfer/terminal-open is recorded in `ssh_audit_log`. Review that table on shared or serious deployments. Stored SSH and sudo passwords (and the generated private key under `data/ssh`, mode `0600`) are as sensitive as any credential on the host — they are never logged, never returned by an API, and are handed to the SSH library in-process rather than through a shell, `ps`-visible argument, or the environment. Interactive terminal sessions exist only in memory and end on disconnect or after 10 minutes idle.
 - Common internal-only ports are Odysseus `7000`, SearXNG `8080`, ntfy `8091`, ChromaDB `8100`, Ollama `11434`, and local model/provider APIs such as `8000-8020`.
 
 ## Publishing A Fork
