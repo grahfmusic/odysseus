@@ -24,6 +24,7 @@ secrets.env~
 /logs/
 .git/
 .claude/
+.freebuff/
 .playwright-mcp/
 .pytest_cache/
 .vscode/

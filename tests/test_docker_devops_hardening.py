@@ -212,6 +212,55 @@ def test_dockerignore_excludes_secrets_editor_backups():
     assert "!secrets.env.example" in patterns
 
 
+def test_dockerignore_excludes_agent_state_directories():
+    """Local agent/tool state must not reach the build context.
+
+    `.freebuff/` holds the coding agent's per-project state and is ignored by git
+    through `.git/info/exclude` — a file Docker never reads, so `COPY`-ing the
+    checkout shipped it into the image until `.dockerignore` covered it. The
+    sibling agent/tooling directories are pinned alongside it so a future tool's
+    state directory gets the same treatment instead of a new leak.
+    """
+    patterns = set((ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
+    assert {
+        ".freebuff/",
+        ".claude/",
+        ".playwright-mcp/",
+        ".pytest_cache/",
+    } <= patterns
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="Docker CLI is unavailable")
+def test_built_image_does_not_bake_in_local_agent_state():
+    """Behavioural half of the `.dockerignore` contract above.
+
+    The static test proves the pattern is written down; this one proves the
+    built artifact honours it, which is the actual delivery promise. Skips (like
+    the sibling image test) when the image has not been built on this host.
+    """
+    image = os.environ.get("ODYSSEUS_DOCKER_TEST_IMAGE", "odysseus-odysseus:latest")
+    if subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).returncode != 0:
+        pytest.skip(f"Docker test image is unavailable: {image}")
+
+    for baked in ("/app/.freebuff", "/app/.claude", "/app/.git"):
+        present = subprocess.run(
+            [
+                "docker", "run", "--rm", "--pull=never",
+                "--entrypoint", "sh", image,
+                "-c", f"test -e {baked}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert present.returncode != 0, f"{baked} was baked into {image}"
+
+
 def test_cors_allow_methods_include_patch():
     methods = _cors_allow_methods()
     assert "PATCH" in methods
