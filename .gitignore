@@ -120,3 +120,7 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# Stray output redirected to the repo root (e.g. a Playwright dump). The UI
+# lives in static/index.html; nothing in this project reads a root index.html.
+/index.html
