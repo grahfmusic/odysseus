@@ -16,6 +16,11 @@ the expected set, and ``RejectPolicy`` is installed whenever that set is
 non-empty. Only a first, entirely unpinned connection uses the capture policy,
 and the key it captured is checked against the stored pin immediately after.
 
+Because the transport is an in-process SSH client rather than a local PTY, all
+three work on every platform the app runs on — including native Windows, where
+``routes/shell_routes.py`` has no PTY at all (spec §9's one-shot degrade is
+therefore not needed for the remote terminal).
+
 Everything here is blocking. Callers must run it via ``asyncio.to_thread`` so the
 FastAPI event loop stays free (same rule the Cookbook/CalDAV paths follow).
 """

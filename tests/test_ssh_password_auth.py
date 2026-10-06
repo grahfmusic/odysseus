@@ -10,6 +10,7 @@ drops the old host's pinned key.
 from contextlib import contextmanager
 
 import base64
+import types
 
 import pytest
 
@@ -269,6 +270,74 @@ class TestPasswordExec:
         monkeypatch.setattr(ssh_client, "run_command", _boom)
         res = ssh_remote.exec_one_shot("alice", srv["id"], "id")
         assert res["exit_code"] == 1 and "AuthenticationException" in res["error"]
+
+
+class TestSudoPiping:
+    """§6.2: the stored sudo password goes over stdin on *both* transports."""
+
+    def test_paramiko_path_uses_sudo_s_not_an_argv(self, ssh_db, monkeypatch):
+        srv = ssh_remote.create_server("alice", label="B", host="box", username="a",
+                                       auth_type="password", password="pw",
+                                       sudo_password="s3cret")
+        _pin("alice", srv["id"])
+        seen = {}
+        monkeypatch.setattr(ssh_client, "run_command",
+                            lambda *a, **kw: seen.update(kw) or {
+                                "stdout": "", "stderr": "", "exit_code": 0})
+        ssh_remote.exec_one_shot("alice", srv["id"], "sudo whoami")
+        assert seen["sudo_password"] == "s3cret"
+
+    def test_argv_path_pipes_the_sudo_password_on_stdin(self, ssh_db, monkeypatch):
+        """Key-only servers keep the argv transport, but the secret still must not
+        appear in the command line — it is rewritten to `sudo -S` and fed on stdin."""
+        _install_key()
+        srv = ssh_remote.create_server("alice", label="B", host="box", username="a",
+                                       auth_type="key", sudo_password="s3cret")
+        _pin("alice", srv["id"])
+        assert ssh_remote._resolve_auth(
+            "alice", ssh_remote.resolve_server("alice", srv["id"]),
+            {"password": "", "sudo_password": "s3cret"})[0]["paramiko"] is False
+        seen = {}
+
+        class _Result:
+            returncode = 0
+            stdout = "ok\n"
+            stderr = ""
+
+        def _run(argv, **kw):
+            seen["argv"] = argv
+            seen["input"] = kw.get("input")
+            return _Result()
+
+        monkeypatch.setattr(ssh_remote, "subprocess", types.SimpleNamespace(run=_run))
+        res = ssh_remote.exec_one_shot("alice", srv["id"], "sudo whoami")
+        assert res["exit_code"] == 0, res
+        assert seen["argv"][-1] == "sudo -S -p \'\' whoami", seen["argv"]
+        assert seen["input"] == "s3cret\n", seen
+        assert not any("s3cret" in str(a) for a in seen["argv"]), seen["argv"]
+
+    def test_argv_path_without_a_stored_password_leaves_the_command_alone(self, ssh_db, monkeypatch):
+        _install_key()
+        srv = ssh_remote.create_server("alice", label="B", host="box", username="a",
+                                       auth_type="key")
+        _pin("alice", srv["id"])
+        seen = {}
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _run(argv, **kw):
+            seen["argv"] = argv
+            seen["input"] = kw.get("input")
+            return _Result()
+
+        monkeypatch.setattr(ssh_remote, "subprocess", types.SimpleNamespace(run=_run))
+        ssh_remote.exec_one_shot("alice", srv["id"], "sudo whoami")
+        # No stored password means the remote host decides (it may have NOPASSWD).
+        assert seen["argv"][-1] == "sudo whoami"
+        assert seen["input"] is None
 
 
 class TestPasswordTransfer:
