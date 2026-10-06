@@ -45,6 +45,9 @@ import themeModule from './js/theme.js';
 // _envState objects), which broke server selection. Keep all cookbook imports
 // unversioned so this can't recur.
 import cookbookModule from './js/cookbook.js';
+// The Machines area follows the same eager-modal precedent as Cookbook (import
+// here + service-worker precache), NOT the lazy panels.js registry.
+import machinesModule from './js/machines.js';
 import groupModule from './js/group.js';
 import * as researchPanelModule from './js/research/panel.js?v=20260630researchthumb';
 import ttsModule from './js/tts-ai.js';
@@ -172,6 +175,7 @@ function initRailHoverLabels() {
     'rail-calendar': 'Calendar',
     'rail-compare': 'Compare',
     'rail-cookbook': 'Cookbook',
+    'rail-machines': 'Machines',
     'rail-research': 'Research',
     'rail-email': 'Email',
     'rail-gallery': 'Gallery',
@@ -723,8 +727,12 @@ function initializeEventListeners() {
 
       // Close one modal at a time (last in DOM = topmost)
       // Map modal id → sidebar list-item id to clear active state
+      // Machines belongs here like every other tool window: without an entry,
+      // Escape on the Machines window falls through to nothing instead of
+      // dismissing it (its close keeps live sessions running, per spec §7.3).
       const modalItemMap = {
         'cookbook-modal': null,
+        'machines-modal': null,
         'rename-session-modal': null,
         'rename-ai-modal': null,
         'custom-preset-modal': null,
@@ -1026,6 +1034,19 @@ function initializeEventListeners() {
     });
   }
 
+  // ── Machines area toggle ──
+  const toolMachinesBtn = el('tool-machines-btn');
+  if (toolMachinesBtn) {
+    toolMachinesBtn.addEventListener('click', async () => {
+      if (!machinesModule) return;
+      // Restores a minimized window; otherwise returns false so we open fresh.
+      const Modals = await import('./js/modalManager.js');
+      if (!Modals.toggle('machines-modal')) {
+        machinesModule.open();
+      }
+    });
+  }
+
   // Document library tool button
   const toolDoclibBtn = el('tool-doclib-btn');
   if (toolDoclibBtn) {
@@ -1186,6 +1207,7 @@ function initializeEventListeners() {
     },
     '/calendar': () => calendarModule && calendarModule.openCalendar(),
     '/cookbook': () => document.getElementById('tool-cookbook-btn')?.click(),
+    '/machines': () => document.getElementById('tool-machines-btn')?.click(),
     '/email':    () => {
       // Collapse the wide sidebar → icon rail (48px) so the user keeps
       // navigation visible alongside the fullscreen email view.
@@ -3740,6 +3762,7 @@ function startOdysseusApp() {
     'rail-compare':   'tool-compare-btn',
     'rail-research':  'tool-research-btn',
     'rail-cookbook':   'tool-cookbook-btn',
+    'rail-machines':  'tool-machines-btn',
     'rail-archive':   'tool-library-btn',
     'rail-gallery':   'tool-gallery-btn',
     'rail-tasks':     'tool-tasks-btn',

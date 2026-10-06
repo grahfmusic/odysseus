@@ -630,7 +630,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
       switch_model <model>    — Change the model for the current session
       set_theme <preset>      — Apply a built-in theme preset (dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute)
       create_theme <name> <bg> <fg> <panel> <border> <accent> [key=val ...] — Create custom theme. Optional key=val: advanced color overrides AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false
-      open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, settings, cookbook)
+      open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, settings, cookbook, machines)
       open_email_reply <uid> [folder] [reply|reply-all|ai-reply] [body text] — Open a reply draft document for an email; does not send. ALWAYS append the body text when the user told you what to say (one-shot draft); only omit body when the user just asked to "open a reply" without content.
       get_toggles             — Return current toggle states (server-side knowledge)
     """
@@ -831,7 +831,8 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
 
     elif action == "open_panel":
         # Open a top-level panel/modal: documents/library, gallery,
-        # email, sessions, notes, memories, skills, settings, cookbook.
+        # email, sessions, notes, memories, skills, settings, cookbook, machines
+        # (the user's own SSH hosts).
         panel = parts[1].lower() if len(parts) > 1 else ""
         _panel_aliases = {
             "documents": "documents",
@@ -864,10 +865,18 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
             "llm": "cookbook",
             "serve": "cookbook",
             "serving": "cookbook",
+            # Owner-scoped SSH hosts. Advertised as `machines` (with these
+            # aliases) by tool_schemas.py / tool_index.py / agent_loop.py, so a
+            # name the model is told to use must resolve here too.
+            "machines": "machines",
+            "machine": "machines",
+            "servers": "machines",
+            "ssh": "machines",
+            "remotes": "machines",
         }
         target = _panel_aliases.get(panel)
         if not target:
-            return {"error": f"Unknown panel '{panel}'. Valid: documents, gallery, email, sessions, notes, memories, skills, settings, cookbook."}
+            return {"error": f"Unknown panel '{panel}'. Valid: documents, gallery, email, sessions, notes, memories, skills, settings, cookbook, machines."}
         return {
             "ui_event": "open_panel",
             "panel": target,

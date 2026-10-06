@@ -475,6 +475,23 @@ def session_count(owner: str) -> int:
         return len([s for s in _sessions.values() if s.owner == owner and not s.closed])
 
 
+def list_terminals(owner: str) -> List[Dict[str, Any]]:
+    """This owner's live PTY sessions (machines-area-spec.md §8.2).
+
+    Read-only inventory mirroring ``session_count``'s scoping: it never opens,
+    adopts or closes anything, so the per-owner cap and the (lazy) idle reaper
+    keep their current behaviour. It exists because a session whose client
+    vanished without disconnecting holds one of the 3 slots while being
+    invisible to every other tab.
+    """
+    with _sessions_lock:
+        live = [s for s in _sessions.values() if s.owner == owner and not s.closed]
+    return [{
+        "session_id": s.id,
+        "server_id": getattr(s, "server_id", "") or "",
+    } for s in live]
+
+
 def _reset_sessions_for_tests() -> None:
     """Test hook: drop every session (mirrors a process restart)."""
     with _sessions_lock:

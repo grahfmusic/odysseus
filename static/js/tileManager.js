@@ -130,8 +130,12 @@ function _zoneForContent(content, x, y) {
   // crushes it. Let it tile only into the normal right half, where the nav can
   // flip to top tabs via CSS when the window gets narrow.
   if (modal && modal.id === 'settings-modal' && zone.name !== 'right-half') return null;
+  // Machines is a fixed 300px master pane plus a detail pane (and a live
+  // terminal inside it) — half-width docking crushes the same way, so it only
+  // accepts the fullscreen zone.
   if (modal && (modal.id === 'cookbook-modal'
-      || modal.id === 'theme-modal')
+      || modal.id === 'theme-modal'
+      || modal.id === 'machines-modal')
       && zone.name !== 'fullscreen') return null;
   return zone;
 }

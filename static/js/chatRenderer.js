@@ -1345,7 +1345,7 @@ document.addEventListener('click', function(e) {
     }
   } catch (_) {}
   if (!href.startsWith('#')) return;
-  let m = href.match(/^#(session|document|note|image|email|event|task|skill|research)-(.+)$/);
+  let m = href.match(/^#(session|document|note|image|email|event|task|skill|research|machine)-(.+)$/);
   if (!m) {
     const noteOpen = href.match(/^#open=notes&note=([^&]+)/);
     if (noteOpen) m = ['note', 'note', decodeURIComponent(noteOpen[1])];
@@ -1419,6 +1419,16 @@ document.addEventListener('click', function(e) {
     import('./research/panel.js').then(mod => {
       const open = mod.openPanel || (mod.default && mod.default.openPanel);
       if (open) open(id);
+    }).catch(() => {});
+  } else if (kind === 'machine') {
+    import('./machines.js').then(mod => {
+      const open = mod.open || (mod.default && mod.default.open);
+      if (open) open({ serverId: id });
+      try {
+        if (/^#machine-/.test(window.location.hash || '')) {
+          history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+      } catch (_) {}
     }).catch(() => {});
   }
 }, true);

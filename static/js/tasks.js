@@ -2610,6 +2610,7 @@ const _CATEGORY_HUES = [
   { hue: 330, kw: /\b(reminder|note|notify|alert)\b/i },                                 // pink   — reminders
   { hue:  10, kw: /\b(check[-_ ]?in|morning|evening|daily|standup)\b/i },                // red    — check-ins
   { hue: 190, kw: /\b(memory|memories|remember|recall)\b/i },                            // teal   — memory
+  { hue: 100, kw: /\b(machines?|ssh|ssh-copy-id|remote[-_ ](host|server)|vps)\b/i },     // lime   — machines (SSH hosts)
 ];
 
 function _hashHue(s) {
@@ -2637,6 +2638,7 @@ const _CATEGORY_LABELS = [
   { label: 'reminders', kw: /\b(reminder|note|notify|alert)\b/i },
   { label: 'check-in',  kw: /\b(check[-_ ]?in|morning|evening|daily|standup)\b/i },
   { label: 'memory',    kw: /\b(memory|memories|remember|recall)\b/i },
+  { label: 'machines',  kw: /\b(machines?|ssh|ssh-copy-id|remote[-_ ](host|server)|vps)\b/i },
 ];
 function _categoryLabel(taskName) {
   const t = (taskName || '').toLowerCase();

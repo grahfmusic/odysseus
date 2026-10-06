@@ -17,7 +17,7 @@
   (`themeModule`, `sessionModule`, `uiModule`, `adminModule`, `cookbookModule`).
 - Patches `fetch` so any `401` redirects the user to `/login`.
 - Fetches the default chat configuration and handles deep-link route openers
-  (`/notes`, `/calendar`, `/email`, `/memory`, `/gallery`, `/cookbook`, `/library`, `/tasks`).
+  (`/notes`, `/calendar`, `/email`, `/memory`, `/gallery`, `/cookbook`, `/library`, `/tasks`, `/machines`).
 - Wires global event listeners: chat-history scrolling, popups, Escape handling,
   drag-and-drop/paste attachment handling, transcription export, sidebar toggles,
   rail/tool buttons, and session sorting.
@@ -154,7 +154,20 @@ The largest and most central subsystem. Chat submission → backend SSE → prog
 
 ---
 
-## 11. Compare and Utility Modules
+## 11. Machines (Remote SSH Hosts)
+
+The owner-scoped SSH feature is a first-class area of its own — never part of
+Settings or Cookbook. `machines.js` owns the window shell and imports
+`sshServers.js`, which stays the data/row/terminal body layer.
+
+| Module | Responsibility |
+|---|---|
+| **`machines.js`** | Machines area shell: modal registration/restore and dock-chip lifecycle, master–detail layout, add/edit form dialog, transfer panel, activity view, live-session list, and the `#machine-<id>` deep link. |
+| **`sshServers.js`** | Machines body/data layer: `/api/ssh/servers` calls, pure payload/SSE helpers, row + list rendering, per-machine terminal (SSE) and one-shot run, plus the audit and live-session reads. |
+
+---
+
+## 12. Compare and Utility Modules
 
 | Module | Responsibility |
 |---|---|
@@ -169,7 +182,7 @@ The largest and most central subsystem. Chat submission → backend SSE → prog
 
 ---
 
-## 12. Frontend Event Streaming Flow
+## 13. Frontend Event Streaming Flow
 
 ```
 User submits composer
@@ -214,7 +227,7 @@ Foreground vs background streams:
 
 ---
 
-## 13. What Changed from the Previous Summary
+## 14. What Changed from the Previous Summary
 
 - The frontend is now exclusively ES6-module based; the old `<script>` tag load
   order is no longer authoritative.

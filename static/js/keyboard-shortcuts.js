@@ -11,7 +11,7 @@ const _defaultKeybinds = {
   cancel: 'escape', tts: 'alt+shift+t',
   incognito: 'ctrl+alt+i', settings: 'ctrl+,', focus_input: 'ctrl+/',
   // Open-tool shortcuts (Calendar bound by default; rest unbound).
-  open_calendar: 'ctrl+alt+c', open_compare: '', open_cookbook: '',
+  open_calendar: 'ctrl+alt+c', open_compare: '', open_cookbook: '', open_machines: '',
   open_research: '', open_gallery: '', open_library: '', open_memory: '',
   open_notes: '', open_tasks: '', open_theme: '',
 };
@@ -105,6 +105,7 @@ export function initKeyboardShortcuts(modules) {
     'gallery-modal':          'tool-gallery-btn',
     'research-overlay':       'tool-research-btn',
     'cookbook-modal':         'tool-cookbook-btn',
+    'machines-modal':         'tool-machines-btn',
     'compare-model-overlay':  'tool-compare-btn',
     'calendar-modal':         'tool-calendar-btn',
     'email-lib-modal':        'email-section-title',
@@ -266,6 +267,7 @@ export function initKeyboardShortcuts(modules) {
       open_calendar: 'tool-calendar-btn',
       open_compare:  'tool-compare-btn',
       open_cookbook: 'tool-cookbook-btn',
+      open_machines: 'tool-machines-btn',
       open_research: 'tool-research-btn',
       open_gallery:  'tool-gallery-btn',
       open_library:  'tool-library-btn',

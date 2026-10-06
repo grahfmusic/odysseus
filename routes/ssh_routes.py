@@ -5,6 +5,11 @@ Any authenticated user may manage and use ONLY their own servers
 src.ssh_remote). The in-process `internal-tool` marker is rejected —
 it is a loopback identity, never a server owner.
 
+The activity reads (`GET /api/ssh/audit`, `.../servers/{id}/audit`) and the live
+session inventory (`GET /api/ssh/terminals`) exist for the Machines area
+(machines-area-spec.md §8/§8.2). They are read-only and never touch the
+connection rate limiter; `scope=all` on the audit read is admin-only.
+
 The interactive terminal (spec §6.3) relays a paramiko PTY over SSE using the
 same frame shape as `routes/shell_routes._generate_pty`:
 ``data: {"stream": "stdout", "data": ...}`` … ``data: {"exit_code": N}``. The
@@ -23,7 +28,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from src.auth_helpers import get_current_user
+from src.auth_helpers import get_current_user, is_delegated_credential
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +103,27 @@ def _owner(request: Request) -> str:
     if not user or user in ("internal-tool", "api"):
         raise HTTPException(401, "Not authenticated")
     return user
+
+
+def _current_user_is_admin(request: Request, user: Optional[str]) -> bool:
+    """Admin check for the cross-user audit view.
+
+    Same shape as ``routes/session_routes._current_user_is_admin`` and
+    ``routes/gallery/gallery_routes.py`` — one admin contract, not a new one. A
+    delegated credential is never admin, and a missing auth_manager fails closed.
+    """
+    if is_delegated_credential(request):
+        return False
+    if not user:
+        return False
+    auth_mgr = getattr(request.app.state, "auth_manager", None)
+    is_admin = getattr(auth_mgr, "is_admin", None)
+    if not callable(is_admin):
+        return False
+    try:
+        return bool(is_admin(user))
+    except Exception:
+        return False
 
 
 def _to_400(exc: Exception) -> HTTPException:
@@ -327,5 +353,55 @@ def setup_ssh_routes() -> APIRouter:
             raise HTTPException(500, str(e)[:300])
         info.pop("private", None)
         return {"ok": True, **info}
+
+    # ── Activity reads (machines-area-spec.md §8) ───────────────────────────
+    # Read-only by design: deliberately NOT behind _check_rate_limit, which
+    # exists for connection-touching endpoints (test/exec/terminal/transfer).
+    # Payloads carry the command *hash* only — never command text or secrets.
+
+    @router.get("/api/ssh/audit")
+    async def ssh_audit(request: Request, limit: int = 50,
+                        event: Optional[str] = None,
+                        server_id: Optional[str] = None,
+                        scope: str = "self"):
+        from src import ssh_remote as ssh
+        owner = _owner(request)
+        want_all = str(scope or "self").strip().lower() == "all"
+        admin = _current_user_is_admin(request, owner)
+        if want_all and not admin:
+            raise HTTPException(403, "Admin required to read every user's SSH activity")
+        rows = ssh.list_audit(owner, limit=limit, event=event, server_id=server_id,
+                              scope="all" if want_all else "self")
+        return {"rows": rows, "scope": "all" if want_all else "self", "admin": admin}
+
+    @router.get("/api/ssh/servers/{server_id}/audit")
+    async def ssh_server_audit(request: Request, server_id: str, limit: int = 50,
+                               event: Optional[str] = None):
+        from src import ssh_remote as ssh
+        owner = _owner(request)
+        try:
+            srv = ssh.resolve_server(owner, server_id)
+        except (LookupError, ValueError):
+            raise HTTPException(404, "Server not found")
+        rows = ssh.list_audit(owner, limit=limit, event=event, server_id=srv["id"])
+        return {"rows": rows, "scope": "self",
+                "admin": _current_user_is_admin(request, owner)}
+
+    @router.get("/api/ssh/terminals")
+    async def ssh_terminals(request: Request):
+        from src import ssh_client, ssh_remote as ssh
+        owner = _owner(request)
+        live = ssh_client.list_terminals(owner)
+        meta = ssh.server_meta([s.get("server_id") for s in live])
+        sessions = []
+        for s in live:
+            sid = s.get("server_id") or ""
+            sessions.append({
+                "session_id": s["session_id"],
+                "server_id": sid,
+                "server_label": meta.get(sid, {}).get("label", ""),
+                "port": meta.get(sid, {}).get("port"),
+            })
+        return {"sessions": sessions}
 
     return router

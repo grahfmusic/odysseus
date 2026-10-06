@@ -17,7 +17,7 @@ function clearFreshComposerRestore() {
   if (!msgInput) return;
   markComposerUserEdited();
   const hash = window.location.hash || '';
-  const isEntityHash = /^#(?:document|note|image|email|event|task|skill|research)-/.test(hash)
+  const isEntityHash = /^#(?:document|note|image|email|event|task|skill|research|machine)-/.test(hash)
     || /^#open=notes&note=/.test(hash);
   const hasSessionTarget = !!(hash && !isEntityHash);
   if (hasSessionTarget) return;

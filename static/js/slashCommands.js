@@ -1345,7 +1345,7 @@ async function _cmdToggleSidebar(args, ctx) {
 async function _cmdOpen(args, ctx) {
   const target = (args[0] || '').trim().toLowerCase();
   if (!target) {
-    slashReply('Open what? Try /open Cookbook, /open Settings, /open Gallery, /open Notes, /open Tasks, /open Library, /open Research, or /open Compare.');
+    slashReply('Open what? Try /open Cookbook, /open Machines, /open Settings, /open Gallery, /open Notes, /open Tasks, /open Library, /open Research, or /open Compare.');
     return true;
   }
   const clickFirst = (...ids) => {
@@ -1380,6 +1380,11 @@ async function _cmdOpen(args, ctx) {
       research: ['tool-research-btn', 'rail-research'],
       compare: ['tool-compare-btn', 'rail-compare'],
       theme: ['tool-theme-btn', 'rail-theme'],
+      // Owner-scoped SSH hosts — a first-class area (machines-area-spec.md),
+      // not a Settings surface.
+      machines: ['tool-machines-btn', 'rail-machines'],
+      machine: ['tool-machines-btn', 'rail-machines'],
+      servers: ['tool-machines-btn', 'rail-machines'],
     };
     const ids = targets[target];
     if (ids && clickFirst(...ids)) return true;
@@ -5994,6 +5999,13 @@ const COMMANDS = {
     help: 'Open Cookbook; use "serve" to jump to model serving',
     handler: (args, ctx) => _cmdToolPanel('cookbook', args, ctx),
     usage: '/cookbook  ·  /cookbook serve qwen'
+  },
+  machines: {
+    alias: ['ssh'],
+    category: 'Tools',
+    help: 'Open Machines — your own SSH hosts (terminals, commands, transfers)',
+    handler: (args, ctx) => _cmdToolPanel('machines', args, ctx),
+    usage: '/machines'
   },
   email: {
     alias: ['mail', 'inbox'],

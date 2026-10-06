@@ -586,14 +586,19 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
 
 
 # SSH exec/upload/terminal must go through the named ssh_exec tool (which
-# wraps remote output per prompt-security). Reachable via app_api: GET
-# list/detail/pubkey + POST test. Everything else under /api/ssh is refused.
+# wraps remote output per prompt-security). This guard is defence in depth, not
+# the real boundary: routes/ssh_routes.py::_owner raises 401 for the
+# `internal-tool`/`api` loopback identity, so NO /api/ssh/* route is reachable
+# via app_api at all — including the read-only GETs this list lets through.
 def _ssh_app_api_blocked(method: str, path: str) -> bool:
     """True when an /api/ssh/* call must not go through the generic loopback.
 
-    Read-only endpoints (the server list and a server's public key) stay
-    reachable — they expose no secrets. Everything else is refused so the agent
-    must use the named `ssh_exec` tool, which carries the plan-mode gate and the
+    Belt and braces only — every /api/ssh/* route refuses the loopback identity
+    in `routes/ssh_routes.py::_owner`, so nothing here is actually reachable
+    through `app_api`. This guard keeps that property if the route-level check
+    is ever relaxed: read-only endpoints (the server list and a server's public
+    key) are allowed here, and everything else is refused so the agent must use
+    the named `ssh_exec` tool, which carries the plan-mode gate and the
     untrusted-output wrapping. The terminal relay (spec §6.3) is refused in both
     directions: its SSE stream and its interactive input channel have no business
     being driven by the loopback at all.
@@ -698,7 +703,7 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         return {"error": f"Unsupported method: {method}", "exit_code": 1}
     if _ssh_app_api_blocked(method, path):
-        return {"error": "Don't hit SSH exec/upload/terminal paths via app_api — use the `ssh_exec` tool (it resolves the saved server and wraps remote output safely). Listing servers and Test are fine via app_api.", "exit_code": 1}
+        return {"error": "Don't hit SSH paths via app_api — the SSH routes reject the loopback identity, so always use the named ssh_exec / list_ssh_servers tool (it resolves the saved server and wraps remote output safely).", "exit_code": 1}
     if any(method == m and path.startswith(p) for m, p in _APP_API_BLOCKLIST_METHOD_PATH):
         if "/api/email/accounts" in path:
             return {"error": "Don't use /api/email/accounts via app_api — it is owner-filtered in tool context and may return empty. Use the `list_email_accounts` email tool, then pass `account` to list_emails/read_email.", "exit_code": 1}

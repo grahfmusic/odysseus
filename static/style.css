@@ -865,7 +865,8 @@ body.bg-pattern-sparkles {
     #tool-library-btn.rail-minimized::after,
     #tool-gallery-btn.rail-minimized::after,
     #tool-compare-btn.rail-minimized::after,
-    #tool-calendar-btn.rail-minimized::after { right: 12px; }
+    #tool-calendar-btn.rail-minimized::after,
+    #tool-machines-btn.rail-minimized::after { right: 12px; }
     /* Cookbook already shows its own running/served-status dot
        (#cookbook-notif-dot, toggled with .cookbook-notif-active on the
        button). Don't stack the tabbed-down pulse on top of it — the two
@@ -19768,6 +19769,13 @@ body.gallery-selecting .gallery-dl-btn,
   position: relative;
 }
 #rail-cookbook {
+  position: relative;
+}
+/* Machines — anchor point for the generic minimized badge (and any future live-session dot) */
+#tool-machines-btn {
+  position: relative;
+}
+#rail-machines {
   position: relative;
 }
 .cookbook-open-loading {

@@ -184,6 +184,76 @@ def _panel_precache_entries() -> set[str]:
     return set(re.findall(r"'([^']+)'", block.group(1)))
 
 
+def _precache_entries() -> set[str]:
+    block = re.search(
+        r"const PRECACHE = \[(.*?)\];", _SW.read_text(encoding="utf-8"), re.S
+    )
+    assert block, "PRECACHE not found in static/sw.js"
+    return set(re.findall(r"'([^']+)'", block.group(1)))
+
+
+# The Machines area takes the other route to the same guarantee: it is a
+# first-class tool imported eagerly by app.js (Cookbook's precedent), so its
+# modules belong in PRECACHE — the app shell list — rather than PANEL_PRECACHE.
+# sshServers.js is the body layer machines.js imports, and before this change it
+# was in NEITHER list even though cookbook.js (precached) imported it, which is
+# precisely how the old "My servers" panel could open online and die offline.
+
+
+def test_the_eager_machines_area_is_precached_for_offline_use():
+    precached = _precache_entries()
+    required = {"/static/js/machines.js", "/static/js/sshServers.js"}
+    missing = required - precached
+    assert not missing, (
+        "the Machines area is imported eagerly by app.js but these modules are "
+        f"not in PRECACHE, so the area would not open offline: {sorted(missing)}"
+    )
+
+
+def test_the_machines_area_is_still_imported_eagerly_by_the_app_shell():
+    """Eager import + PRECACHE are a single guarantee; pin both halves.
+
+    A module can keep its PRECACHE entry after losing the app.js import (dead
+    weight, and the area would then only load if something else imported it), or
+    keep the import while dropping out of PRECACHE (offline break). The test
+    above covers the second half; this is the first.
+    """
+    app = (_REPO / "static" / "app.js").read_text(encoding="utf-8")
+    assert "import machinesModule from './js/machines.js';" in app, (
+        "static/app.js no longer imports the Machines area eagerly — either "
+        "restore the import or move the area (and this test) to the lazy "
+        "panels.js/PANEL_PRECACHE route; do not leave the two halves split"
+    )
+
+
+def test_every_relative_import_of_the_machines_area_resolves_to_a_precache_entry():
+    """machines.js's own local imports must be reachable with no network.
+
+    modalManager.js / ui.js / windowDrag.js are already shell modules, so this
+    pins the one that is not: the body layer the shell pulls in.
+    """
+    source = (_JS_DIR / "machines.js").read_text(encoding="utf-8")
+    local = [s for s in _STATIC_IMPORT.findall(source) if s.startswith(".")]
+    assert "./sshServers.js" in local, (
+        "machines.js no longer imports the sshServers.js body layer — update this "
+        "test if the area was restructured"
+    )
+    precached = _precache_entries()
+    missing = {
+        f"/static/js/{os.path.normpath(s.lstrip('./'))}"
+        for s in local if s.endswith(".js")
+    } - precached
+    # modalManager.js, ui.js and windowDrag.js are loaded by index.html itself.
+    missing -= {
+        "/static/js/modalManager.js",
+        "/static/js/ui.js",
+        "/static/js/windowDrag.js",
+    }
+    assert not missing, (
+        f"these machines.js imports are in neither sw.js list: {sorted(missing)}"
+    )
+
+
 def test_every_lazy_editor_module_is_precached_for_offline_use():
     graph = _editor_module_graph()
     precached = _panel_precache_entries()

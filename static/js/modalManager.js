@@ -128,6 +128,9 @@ function _setBadge(btnIds, on) {
 
 const _LABELS = {
   'cookbook-modal':    { label: 'Cookbook',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>' },
+  // Owner-scoped SSH hosts ("My servers" is not configuration — it is its own
+  // area). Server-rack glyph: two stacked bays with a status dot each.
+  'machines-modal':    { label: 'Machines',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01"/><path d="M7 16.5h.01"/></svg>' },
   'calendar-modal':    { label: 'Calendar',  icon: 'M3 4h18v18H3zM16 2v4M8 2v4M3 10h18' },
   'gallery-modal':     { label: 'Gallery',   icon: 'M3 3h18v18H3zM8.5 8.5l3 3M21 15l-5-5L5 21' },
   'tasks-modal':       { label: 'Tasks',     icon: 'M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11' },
@@ -1403,6 +1406,7 @@ export function injectMinimizeButton(modal, modalId) {
 // can still register explicitly with custom restoreFn/closeFn.
 const _AUTO_WIRE = {
   'cookbook-modal':       { rail: 'rail-cookbook',  sidebar: 'tool-cookbook-btn' },
+  'machines-modal':       { rail: 'rail-machines',  sidebar: 'tool-machines-btn' },
   'calendar-modal':       { rail: 'rail-calendar',  sidebar: 'tool-calendar-btn' },
   'gallery-modal':        { rail: 'rail-gallery',   sidebar: 'tool-gallery-btn' },
   'tasks-modal':          { rail: 'rail-tasks',     sidebar: 'tool-tasks-btn' },
@@ -1473,6 +1477,9 @@ const _SWIPE_DOWN_MINIMIZES = new Set([
   'cookbook-modal',
   'calendar-modal',
   'email-lib-modal',
+  // Machines holds live terminal state, so a swipe must dock it (the chip is
+  // the visible "a session is still live" affordance) rather than close it.
+  'machines-modal',
 ]);
 // Same idea but matched by id prefix — so dynamically-created modals
 // (per-email reader tabs) survive swipe-down too.

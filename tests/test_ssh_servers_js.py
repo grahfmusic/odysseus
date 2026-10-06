@@ -1,12 +1,20 @@
-"""`My servers` panel (static/js/sshServers.js) — pure helpers + Cookbook wiring.
+"""Machines area — `static/js/machines.js` shell + `static/js/sshServers.js` body.
+
+The owner-scoped SSH servers feature is no longer a card in the Cookbook modal: it
+is a first-class top-level *Machines* area (spec: machines-area-spec.md). The
+window shell (`static/js/machines.js`) owns the modal, the master–detail layout,
+the form dialog, transfer and activity; `static/js/sshServers.js` stays the
+data / row / terminal body layer.
 
 Pure helpers are executed under `node --input-type=module` (same approach as
 test_compare_js.py) against the real module source, with a stub ui.js so the
-browser-only import resolves. Source assertions pin the Cookbook wiring and the
-security property that every user-controlled field is escaped.
+browser-only import resolves. Source assertions pin the new placement, the
+terminal-lifecycle rule (minimize/close must NOT end a session) and the security
+property that every user-controlled field is escaped and no secret is printed.
 """
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -15,7 +23,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "static" / "js" / "sshServers.js"
+SHELL = ROOT / "static" / "js" / "machines.js"
 COOKBOOK = ROOT / "static" / "js" / "cookbook.js"
+INDEX = ROOT / "static" / "index.html"
 
 _HAS_NODE = shutil.which("node") is not None
 
@@ -30,13 +40,32 @@ export default {
 """
 
 
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _func_body(src: str, name: str) -> str:
+    """Slice one top-level function body: `function NAME(` … first line-start `}`.
+
+    Deliberately not a parser — just enough to assert *inside* one function
+    rather than anywhere in the file (which is how the old teardown pin went
+    wrong: it counted call sites across the whole module).
+    """
+    start = src.find(f"function {name}(")
+    assert start != -1, f"function {name} not found"
+    end = src.find("\n}", start)
+    assert end != -1, f"unterminated function {name}"
+    return src[start:end]
+
+
 def _run_node(body: str) -> dict:
     """Copy the module + ui stub into a temp dir and import it under node."""
     import tempfile
 
     script = f"""
 import {{ sshServerPayload, sshTestMessage, sshErrorText, sshServerRowHtml,
-        sshServersListHtml, parseSshSse }} from './sshServers.js';
+        sshServersListHtml, parseSshSse, sshMachineDetailHostHtml,
+        sshMachineInfoHtml, sshAuditRowHtml, sshTransferRequest }} from './sshServers.js';
 {body}
 """
     with tempfile.TemporaryDirectory() as td:
@@ -142,12 +171,112 @@ console.log(JSON.stringify(sshServerRowHtml({ id: 's1', host_key_fingerprint: 'S
     def test_empty_list_shows_empty_state(self):
         out = _run_node("""
 console.log(JSON.stringify([sshServersListHtml([]),
-                            sshServersListHtml(null).includes('No servers yet'),
+                            sshServersListHtml(null).includes('No machines yet'),
                             sshServersListHtml([{ id: 'a' }, { id: 'b' }]).split('data-ssh-row=').length - 1]));
 """)
         assert out[0].count("data-ssh-row=") == 0
         assert out[1] is True
         assert out[2] == 2
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+class TestMachinesHelpers:
+    """Pure helpers added by the Machines restructure (spec §6.3 / §7.2 / §8)."""
+
+    def test_detail_host_is_a_per_machine_slot_with_both_hosts(self):
+        """One stable DOM node per machine — that is what keeps a live terminal."""
+        out = _run_node("""
+console.log(JSON.stringify(sshMachineDetailHostHtml('abc')));
+""")
+        assert 'data-machine-slot="abc"' in out
+        # The action host the body module writes into, and the shell's own panes.
+        assert 'data-ssh-detail="abc"' in out
+        assert 'data-machine-info="abc"' in out
+        assert 'data-machine-extra="abc"' in out
+        assert out.count('data-machine-slot="abc"') == 1
+
+    def test_detail_host_escapes_a_hostile_id(self):
+        out = _run_node("""
+console.log(JSON.stringify(sshMachineDetailHostHtml('a" onmouseover="x')));
+""")
+        assert 'onmouseover="x"' not in out
+        assert "&quot;" in out
+
+    def test_info_pane_reports_target_auth_and_pin_state(self):
+        out = _run_node("""
+console.log(JSON.stringify(sshMachineInfoHtml({
+  id: 's1', label: 'pi', host: 'pi.lan', port: 2222, username: 'me',
+  auth_type: 'both', host_key_fingerprint: 'SHA256:zzz', last_test_result: 'ok',
+})));
+""")
+        assert "me@pi.lan:2222" in out          # target
+        assert "key + password" in out          # auth label, never a secret
+        assert "SHA256:zzz" in out              # pinned fingerprint
+        assert "never tested" not in out        # last test recorded
+
+    def test_info_pane_says_a_server_is_unpinned_and_untested(self):
+        out = _run_node("""
+console.log(JSON.stringify(sshMachineInfoHtml({ id: 's1', host: 'h' })));
+""")
+        assert "not pinned" in out and "never tested" in out
+
+    def test_info_pane_escapes_hostile_fields(self):
+        out = _run_node("""
+console.log(JSON.stringify(sshMachineInfoHtml({ host: '<img src=x>' })));
+""")
+        assert "<img" not in out
+        assert "&lt;img src=x&gt;" in out
+
+    def test_audit_row_shows_a_hash_prefix_and_never_a_command(self):
+        out = _run_node("""
+console.log(JSON.stringify(sshAuditRowHtml({
+  id: 1, server_id: 's1', server_label: 'pi', event: 'exec',
+  created_at: '2026-10-07T12:34:56.789Z', exit_code: 0,
+  command_hash: 'a'.repeat(64),
+})));
+""")
+        assert "2026-10-07 12:34:56" in out
+        assert "exec" in out and "pi" in out
+        assert "aaaaaaaaaaaa" in out            # 12-char hash prefix
+        assert "a" * 13 not in out              # …not the whole digest
+        assert " · exit 0" in out
+
+    def test_audit_row_survives_an_empty_or_null_payload(self):
+        """An empty/partial/null row must render, not throw.
+
+        The log outlives its server (`server_id` has no FK), so a row can arrive
+        with no label at all. `null` is pinned explicitly: a JS default parameter
+        only covers `undefined`, so `sshAuditRowHtml(null)` threw until the body
+        module started guarding with `r = r || {}`.
+        """
+        out = _run_node("""
+console.log(JSON.stringify([sshAuditRowHtml({}), sshAuditRowHtml(undefined),
+                            sshAuditRowHtml(null), sshAuditRowHtml({ event: 'test' })]));
+""")
+        assert len(out) == 4
+        assert "—" in out[0] and "—" in out[1] and "—" in out[2]
+
+    def test_audit_row_escapes_a_hostile_label(self):
+        out = _run_node("""
+console.log(JSON.stringify(sshAuditRowHtml({ server_label: '<img src=x>', event: 'test' })));
+""")
+        assert "<img" not in out
+        assert "&lt;img src=x&gt;" in out
+
+    def test_transfer_request_mirrors_the_server_model(self):
+        out = _run_node("""
+console.log(JSON.stringify([
+  sshTransferRequest({ direction: 'upload', local_path: ' a/b ', remote_path: ' /tmp/c ' }),
+  sshTransferRequest({ direction: 'download' }),
+  sshTransferRequest({}),
+  sshTransferRequest({ direction: 'nonsense' }),
+]));
+""")
+        assert out[0] == {"direction": "upload", "local_path": "a/b", "remote_path": "/tmp/c"}
+        assert out[1]["direction"] == "download"
+        assert out[2]["direction"] == "upload"          # defaults to upload
+        assert out[3]["direction"] == "upload"          # anything else is upload
+        assert set(out[2]) == {"direction", "local_path", "remote_path"}
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
@@ -213,28 +342,28 @@ console.log(JSON.stringify([parseSshSse(''), parseSshSse(null), parseSshSse(unde
 
 
 class TestModuleContract:
-    """The panel must use its own endpoints and never touch Cookbook state."""
+    """The body must use its own endpoints and never touch Cookbook state."""
 
     def test_talks_only_to_ssh_api(self):
-        src = MODULE.read_text(encoding="utf-8")
+        src = _read(MODULE)
         assert "const API = '/api/ssh/servers';" in src
         assert "/api/cookbook" not in src
 
     def test_does_not_share_cookbook_server_state(self):
         """Disjoint by design: never merge into _envState.servers."""
-        src = MODULE.read_text(encoding="utf-8")
+        src = _read(MODULE)
         assert "_envState" not in src
 
     def test_toast_sink_is_text_only(self):
         """Remote-derived text reaches showToast; it must not be innerHTML."""
-        ui = (ROOT / "static" / "js" / "ui.js").read_text(encoding="utf-8")
+        ui = _read(ROOT / "static" / "js" / "ui.js")
         start = ui.index("export function showToast(")
         body = ui[start:ui.index("\n}", start)]
         assert "textSpan.textContent = msg;" in body
         assert "textSpan.innerHTML" not in body
 
     def test_secrets_are_never_rendered_back(self):
-        src = MODULE.read_text(encoding="utf-8")
+        src = _read(MODULE)
         # The panel may send a password, but no code path prints a stored one.
         assert "has_password" not in src
         assert "s.password" not in src
@@ -244,7 +373,7 @@ class TestTerminalContract:
     """Source-level pins for the terminal panel's request shape."""
 
     def test_terminal_verbs_match_the_server_routes(self):
-        src = MODULE.read_text(encoding="utf-8")
+        src = _read(MODULE)
         assert "`/${encodeURIComponent(id)}/terminal`" in src           # POST open
         assert "path + '/stream'" in src                               # GET stream
         assert "path + '/input'" in src                                # POST input
@@ -252,39 +381,411 @@ class TestTerminalContract:
         assert "{ method: 'DELETE' }" in src                           # DELETE close
 
     def test_input_is_line_oriented_and_escaped_into_the_dom(self):
-        src = MODULE.read_text(encoding="utf-8")
+        src = _read(MODULE)
         # Output lands in a <pre> via textContent — never innerHTML.
         assert "out.textContent += text;" in src
         assert "out.innerHTML" not in src
         assert "e.key !== 'Enter'" in src
 
-    def test_live_session_is_closed_when_the_panel_goes_away(self):
-        src = MODULE.read_text(encoding="utf-8")
-        assert "function _closeTerminal(d)" in src
-        # Reusing or hiding the detail panel must not orphan the remote PTY.
-        assert src.count("_closeTerminal(d);") >= 2
-        assert "t.controller.abort();" in src
+    def test_hiding_the_panel_keeps_the_live_session_running(self):
+        """INVERTED pin (was test_live_session_is_closed_when_the_panel_goes_away).
 
-    def test_server_derived_strings_are_escaped(self):
-        src = MODULE.read_text(encoding="utf-8")
+        The old rule — "a live PTY must not keep running behind a new panel" —
+        had `_showDetail` and `_hideDetail` both call the teardown helper, so
+        switching machines or collapsing the panel silently killed the session.
+        The requirement is now the opposite (spec §7.3, AC5): minimizing or
+        closing the Machines window must NOT end a session, because the point of
+        the dock chip is a terminal that survives behind it. Only an explicit
+        Disconnect — or the server's own 3-session cap / idle reaper — may end
+        one. Keeping the old assertion would actively reward the broken
+        behaviour, which is why it is inverted rather than deleted.
+        """
+        src = _read(MODULE)
+        show = _func_body(src, "_showDetail")
+        hide = _func_body(src, "_hideDetail")
+
+        # Neither the show nor the hide path may tear a session down…
+        for body in (show, hide):
+            assert "_closeTerminal" not in body
+            assert "abort" not in body
+            assert "closeSshTerminalById" not in body
+        # …and hiding must not destroy the terminal's DOM either: a minimized
+        # window or another selection has to be able to come back to its output.
+        assert "innerHTML" not in hide
+        assert "display = 'none'" in hide
+
+    def test_the_only_in_ui_teardown_is_an_explicit_disconnect(self):
+        src = _read(MODULE)
+        assert ".ssh-t-disconnect" in src
+        connect = _func_body(src, "_onConnect")
+        disconnect = connect[connect.index(".ssh-t-disconnect"):]
+        assert "closeSshTerminalById(id, sid)" in disconnect
+        # Exactly one controller abort in the whole module, and it lives on the
+        # explicit close path — nothing else can silently drop the stream.
+        assert src.count(".controller.abort();") == 1
+        assert ".controller.abort();" in _func_body(src, "closeSshTerminalById")
+
+    def test_a_server_derived_string_is_escaped(self):
+        src = _read(MODULE)
         assert "const target = esc(info.target || 'remote');" in src
 
 
-class TestCookbookWiring:
-    def test_cookbook_imports_and_initialises_the_panel(self):
-        src = COOKBOOK.read_text(encoding="utf-8")
+class TestShellContract:
+    """The Machines shell owns the window; the body is injected into it."""
+
+    def test_shell_imports_and_initialises_the_body(self):
+        src = _read(SHELL)
         assert "import { initSshServers } from './sshServers.js';" in src
         assert "initSshServers(body);" in src
 
-    def test_panel_markup_is_present(self):
-        src = COOKBOOK.read_text(encoding="utf-8")
-        for anchor in ('id="ssh-servers-list"', 'id="ssh-server-add"',
-                       'id="ssh-servers-status"', 'id="ssh-add-host"',
-                       'id="ssh-add-user"'):
+    def test_shell_registers_the_window_with_its_own_triggers(self):
+        src = _read(SHELL)
+        assert "railBtnId: 'rail-machines'" in src
+        assert "sidebarBtnId: 'tool-machines-btn'" in src
+        assert "Modals.register(MODAL_ID, {" in src
+        # Never toggle-close from the trigger: a minimized window is restored.
+        assert "Modals.isMinimized(MODAL_ID)" in src
+
+    def test_shell_never_tears_its_body_down_on_hide_or_close(self):
+        src = _read(SHELL)
+        mount = _func_body(src, "_mount")
+        assert "if (_mounted) return;" in mount          # idempotent mount
+        assert "body.innerHTML = _shellHtml();" in mount
+        close_body = _func_body(src, "close")
+        for forbidden in ("innerHTML", "remove()", "initSshServers", "_render("):
+            assert forbidden not in close_body
+        do_close = _func_body(src, "_doClose")
+        assert "innerHTML" not in do_close               # closing only hides
+
+    def test_shell_keeps_each_machines_detail_node_across_a_refresh(self):
+        """Rebuilding the slots would destroy a live terminal (AC5)."""
+        src = _read(SHELL)
+        slots = _func_body(src, "_renderSlots")
+        assert "host.innerHTML" not in slots
+        assert "insertAdjacentHTML('beforeend'" in slots
+        # Only slots for machines that no longer exist get removed.
+        assert "slot.remove()" in slots
+
+    def test_shell_supports_a_deep_link_to_one_machine(self):
+        src = _read(SHELL)
+        assert "export async function open(opts = {})" in src
+        assert "opts.serverId" in src
+        assert "_select(opts.serverId)" in src
+
+    def test_shell_owns_the_form_dialog_and_the_area_panels(self):
+        src = _read(SHELL)
+        for fn in ("_openForm", "_saveForm", "_openTransfer", "_openActivity"):
+            assert f"function {fn}(" in src, fn
+        # Add/edit is a dialog now, not the old cramped inline row.
+        for el_id in ("machines-f-label", "machines-f-host", "machines-f-user",
+                      "machines-f-auth", "machines-f-save", "machines-f-cancel"):
+            assert f'id="{el_id}"' in src, el_id
+        # The guided empty state and the live-session surface are part of v1.
+        assert "machines-empty-add" in src
+        assert "machines-disconnect-all" in src
+
+    def test_shell_routes_edit_into_its_own_dialog(self):
+        src = _read(SHELL)
+        assert "setSshActionHandlers({" in src
+        assert "edit: (id) => _openForm(id)," in src
+        # The body owns test/connect/disconnect/delete; it reports those moves
+        # back so the panes the shell derives from them are not stale.
+        assert "changed: (reason)" in src
+
+
+class TestInteractionWiring:
+    """Every visible affordance must reach a handler (found the hard way).
+
+    Each of these rendered perfectly and did nothing in the browser: the header
+    ✖ was never bound (the "toggle window" hotkey closes the area by clicking it),
+    the guided empty state's CTA was bound to a node `_render()` replaces, and the
+    detail pane sat outside the delegated listener's scope. None of them fails a
+    render test, which is exactly why they are pinned here.
+    """
+
+    def test_header_close_button_is_bound(self):
+        src = _read(SHELL)
+        assert 'id="close-machines-modal"' in _read(INDEX)
+        wire = _func_body(src, "_wire")
+        assert "close-machines-modal" in wire, "the header ✖ has no listener"
+        # It must run the module's own close (Modals-aware), not just hide.
+        assert "close();" in wire
+
+    def test_empty_state_cta_rides_the_delegated_handler(self):
+        """`_wire()` runs once, then `_render()` re-creates the empty state."""
+        src = _read(SHELL)
+        assert 'id="machines-empty-add"' in _func_body(src, "_emptyStateHtml")
+        assert 'data-machine-action="add"' in _func_body(src, "_emptyStateHtml")
+        assert "action === 'add'" in _func_body(src, "_wire")
+        # A per-element binding would be thrown away with the previous node.
+        assert "machines-empty-add')?.addEventListener" not in src
+
+    def test_detail_pane_actions_are_inside_the_delegation_scope(self):
+        """The detail pane is outside `#ssh-servers-list`: the listener has to
+        cover the whole area, and each detail button has to name its machine."""
+        src = _read(MODULE)
+        init = _func_body(src, "initSshServers")
+        assert "scope.addEventListener('click'" in init
+        assert "querySelector('#ssh-servers-list')" not in init
+        for fn in ("_editFormHtml", "_runFormHtml", "_onKey"):
+            assert "data-id=" in _func_body(src, fn), fn
+
+    def test_detail_host_resolves_to_the_shell_slot(self):
+        """The row still carries a hidden detail host and the list comes first in
+        document order, so an unscoped lookup writes terminals into the 300px
+        list pane instead of the detail pane on the right."""
+        src = _read(MODULE)
+        assert ".machine-detail-slot [data-ssh-detail=" in _func_body(src, "_detail")
+
+    def test_body_reports_state_changes_to_the_shell(self):
+        src = _read(MODULE)
+        assert "function _notifyChanged(" in src
+        for fn in ("_onTest", "_onConnect", "_onDelete"):
+            assert "_notifyChanged(" in _func_body(src, fn), fn
+        # Order matters on delete: the shell re-renders from the cached list, so
+        # notifying before the re-fetch redraws the deleted machine's slot.
+        delete = _func_body(src, "_onDelete")
+        assert delete.index("await refreshSshServers();") < delete.index("_notifyChanged('deleted')")
+        mount = _func_body(_read(SHELL), "_mount")
+        assert "changed: (reason)" in mount
+        assert "_render()" in mount
+
+    def test_disconnect_all_follows_the_last_session(self):
+        live = _func_body(_read(SHELL), "_renderLive")
+        assert live.index("_toggleDisconnectAll") < live.index("if (!sessions.length)"), (
+            "the early return skips the toggle, leaving a button with nothing to do"
+        )
+
+    def test_form_escape_is_bound_on_window_capture(self):
+        """ui.js's global Escape arbiter is a *document*-capture listener that
+        closes the hovered window first, and the pointer is over this window
+        whenever the form is being typed into — so a document-level handler (the
+        cookbook Serve-card pattern) loses the race and the whole window closes,
+        discarding a typed password with it."""
+        src = _read(SHELL)
+        idx = src.index("window._machinesFormEscBound")
+        bind = src[idx:idx + 200]
+        assert "window.addEventListener('keydown'" in bind, bind
+        esc = src[src.index("e.key !== 'Escape'"):]
+        assert "modal.classList.contains('hidden')" in esc[:400], (
+            "a closed window would swallow the app shell's Escape"
+        )
+        assert "_closeForm();" in esc[:600]
+
+
+class TestBodyApiSurface:
+    """Everything the shell calls must be exported by the body module."""
+
+    def test_shell_facing_exports_exist(self):
+        src = _read(MODULE)
+        for name in ("setSshActionHandlers", "createSshServer", "updateSshServer",
+                     "deleteSshServer", "sshServerPubkey", "transferSshFile",
+                     "listSshAudit", "listSshTerminals", "closeSshTerminalById",
+                     "disconnectAllTerminals", "getLiveTerminals", "getSshServers",
+                     "initSshServers"):
+            assert f"function {name}(" in src, name
+        # The shell's `open()` must be able to re-render from the same fetch.
+        assert "export function getSshServers()" in src
+
+    def test_shell_only_calls_exports_the_body_declares(self):
+        """A shell call that is not exported would throw at import time."""
+        shell = _read(SHELL)
+        body = _read(MODULE)
+        blocks = re.findall(r"import\s*\{([^}]*)\}\s*from\s*'\./sshServers\.js';", shell)
+        assert blocks, "the shell does not import the body module"
+        imported = [n.strip() for block in blocks for n in block.split(",") if n.strip()]
+        assert "initSshServers" in imported
+        for name in imported:
+            assert (f"export function {name}(" in body
+                    or f"export async function {name}(" in body), name
+
+    def test_audit_and_live_session_reads_are_read_only(self):
+        src = _read(MODULE)
+        assert "/api/ssh/audit" in src and "/api/ssh/terminals" in src
+        audit = _func_body(src, "listSshAudit")
+        assert "_fetchUrl('/api/ssh/audit'" in audit          # no method override
+        for verb in ("POST", "PATCH", "DELETE", "method:"):
+            assert verb not in audit
+        live = _func_body(src, "listSshTerminals")
+        assert "_fetchUrl('/api/ssh/terminals')" in live
+        for verb in ("POST", "PATCH", "DELETE", "method:"):
+            assert verb not in live
+
+    def test_audit_scope_is_only_sent_when_asked_for(self):
+        """`scope=all` is admin-gated server-side; the client must not default it."""
+        src = _read(MODULE)
+        audit = _func_body(src, "listSshAudit")
+        assert "if (params.scope) q.set('scope', String(params.scope));" in audit
+
+
+class TestNoSecretsRendered:
+    """Display paths must never read a stored secret back into the DOM."""
+
+    def test_display_helpers_never_mention_a_password(self):
+        src = _read(MODULE)
+        assert "has_password" not in src
+        assert "s.password" not in src
+        for fn in ("sshServerRowHtml", "sshServersListHtml", "sshMachineInfoHtml",
+                   "sshMachineDetailHostHtml", "sshAuditRowHtml"):
+            assert "password" not in _func_body(src, fn).lower(), fn
+
+    def test_the_shell_password_input_is_write_only(self):
+        src = _read(SHELL)
+        assert "has_password" not in src
+        reads = [ln for ln in src.splitlines() if "machines-f-pass" in ln and ".value" in ln]
+        assert len(reads) == 1, reads
+        # The one read is the payload builder — it is sent, never rendered.
+        assert "machines-f-pass" in _func_body(src, "_saveForm")
+        for fn in ("_showCommands", "_renderLive", "_loadActivity", "_openForm"):
+            assert "machines-f-pass')?.value" not in _func_body(src, fn), fn
+
+    def test_activity_copy_promises_hashes_not_commands(self):
+        src = _read(SHELL)
+        assert "never commands or secrets" in src
+
+
+class TestMachinesWiring:
+    """Placement: a top-level Machines area, and a Cookbook that lost the card."""
+
+    def test_index_has_the_machines_modal_and_its_triggers(self):
+        src = _read(INDEX)
+        for anchor in ('id="machines-modal"', 'machines-body',
+                       'id="tool-machines-btn"', 'id="rail-machines"',
+                       'data-ui-key="tool-machines"'):
             assert anchor in src, anchor
 
-    def test_panel_lives_beside_the_cookbook_servers_block(self):
-        src = COOKBOOK.read_text(encoding="utf-8")
+    def test_cookbook_no_longer_imports_or_initialises_the_panel(self):
+        src = _read(COOKBOOK)
+        assert "sshServers" not in src
+        assert "initSshServers" not in src
+        for leftover in ('ssh-servers-list', 'ssh-servers-status', 'ssh-server-add',
+                         'ssh-add-host', 'ssh-add-user', 'ssh-add-port', 'ssh-add-auth',
+                         'ssh-servers-card'):
+            assert leftover not in src, leftover
+
+    def test_cookbook_keeps_the_shared_servers_block_only(self):
+        src = _read(COOKBOOK)
         assert "// \u2500\u2500 Servers block" in src
-        assert "// \u2500\u2500 My servers" in src
-        assert src.index("// \u2500\u2500 Servers block") < src.index("// \u2500\u2500 My servers")
+        assert "// \u2500\u2500 My servers" not in src
+        assert "My servers" not in src
+
+    def test_settings_has_no_ssh_or_machines_panel(self):
+        """AC2 — the request was that this feature is *not* configuration.
+
+        The feature is owner-scoped machines, not a preference, so nothing about
+        it may appear in the main Settings dialog: no panel, no row, no link. A
+        positive assertion would not catch a panel added later, so this pins the
+        absence in the surfaces that render Settings.
+        """
+        forbidden = ("sshServers", "initSshServers", "ssh-servers-list",
+                     "data-settings-panel=\"machines\"", "data-settings-panel=\"ssh\"",
+                     "machines-modal")
+        for rel in ("static/js/settings.js", "static/js/settings/registry.js",
+                    "static/js/settings/lifecycle.js"):
+            src = _read(ROOT / rel)
+            for needle in forbidden:
+                assert needle not in src, f"{rel} must not carry SSH/Machines config: {needle}"
+        # Panel ids are the other way Settings can grow an entry, so pin those too.
+        registry = _read(ROOT / "static/js/settings/registry.js")
+        panel_ids = set(re.findall(r"id:\s*'([^']+)'", registry))
+        assert not (panel_ids & {"machines", "machine", "ssh", "servers"}), panel_ids
+        # The Settings modal markup must not carry an SSH management surface.
+        # (The Appearance panel's `data-ui-key="tool-machines"` checkbox is
+        # generic per-tool chrome that every tool has — see the wiring test
+        # above — so it is deliberately not included in the forbidden list.)
+        settings_markup = _read(INDEX).split('id="settings-modal"', 1)[-1]
+        assert "ssh-servers-list" not in settings_markup
+        assert "data-settings-panel=\"machines\"" not in settings_markup
+
+
+class TestAppShellWiring:
+    """Every entry point that makes the area reachable, pinned where it lives.
+
+    Spec §13 asks for these specifically. None of them fails loudly when it is
+    missing: a dead rail button still renders, a hotkey whose key is absent from
+    the category list simply never shows a row, and an entity hash claimed by the
+    session logic navigates away instead. All of them are one careless edit from
+    regressing, so each is pinned next to the file that owns it.
+    """
+
+    def test_shell_default_export_matches_the_app_shell_import(self):
+        """The exact shape that took the whole app shell down once.
+
+        `static/app.js` imports modal tools with a DEFAULT import (Cookbook's
+        convention), so a module with only named exports is a link-time error for
+        the entire app — not a lazy 404 at the point of use. Pin the pair.
+        """
+        shell = _read(SHELL)
+        assert "const machinesModule = { open, close, isVisible };" in shell
+        assert "export default machinesModule;" in shell
+        assert "import machinesModule from './js/machines.js';" in _read(
+            ROOT / "static" / "app.js"
+        )
+
+    def test_modal_manager_knows_the_window(self):
+        src = _read(ROOT / "static" / "js" / "modalManager.js")
+        assert re.search(r"'machines-modal':\s*\{ label: 'Machines'", src), (
+            "no dock-chip label — minimize would put an unlabelled chip in the dock"
+        )
+        assert re.search(
+            r"'machines-modal':\s*\{ rail: 'rail-machines',\s*sidebar: 'tool-machines-btn'",
+            src,
+        ), "auto-wire missing — the badge/restore path silently no-ops"
+        assert "'machines-modal'," in src, (
+            "not in the swipe-down set: a swipe would close the window instead of "
+            "docking it, losing the live-session affordance"
+        )
+
+    def test_app_shell_wires_both_triggers_and_escape(self):
+        src = _read(ROOT / "static" / "app.js")
+        assert re.search(r"'rail-machines':\s*'tool-machines-btn'", src), (
+            "missing _railToolMap entry — the rail button renders and does nothing"
+        )
+        assert "'/machines':" in src, "missing _routeOpen entry"
+        assert "machinesModule.open()" in src, "missing sidebar click block"
+        assert "'machines-modal': null," in src, (
+            "absent from the Escape map: Escape would not dismiss the window the "
+            "way it dismisses every sibling tool window"
+        )
+
+    def test_hotkey_touchpoints_are_complete(self):
+        """Six touchpoints, all required — the category list drives the row."""
+        kb = _read(ROOT / "static" / "js" / "keyboard-shortcuts.js")
+        assert "open_machines: ''" in kb
+        assert "'machines-modal':" in kb
+        assert "open_machines: 'tool-machines-btn'" in kb
+        st = _read(ROOT / "static" / "js" / "settings.js")
+        assert st.count("open_machines") >= 4, (
+            "expected defaults + icon + label + 'Open Tools' category entry"
+        )
+        assert "'Open Machines'" in st
+
+    def test_slash_command_and_panel_link_reach_the_area(self):
+        slash = _read(ROOT / "static" / "js" / "slashCommands.js")
+        assert "machines: ['tool-machines-btn', 'rail-machines']" in slash, (
+            "/open machines has no target — the command is advertised but inert"
+        )
+        assert "usage: '/machines'" in slash, "missing /machines registration"
+        stream = _read(ROOT / "static" / "js" / "chatStream.js")
+        assert "panel === 'machines'" in stream, "no panel-link branch"
+        assert "import('./machines.js')" in stream
+
+    def test_every_entity_hash_inventory_knows_machine(self):
+        """The `#machine-<id>` prefix is hand-copied into five files.
+
+        Missing it in one of them does not fail loudly: `chat.js` treats the hash
+        as a *session* candidate (selects a session that does not exist and
+        suppresses composer restore), `sessions.js` restores the last chat
+        instead of landing fresh and keeps reacting on hashchange, and
+        `markdown.js` stops repairing mangled anchors for machine links.
+        """
+        for rel in ("static/js/init.js", "static/js/chatRenderer.js",
+                    "static/js/chat.js", "static/js/sessions.js",
+                    "static/js/markdown.js"):
+            src = _read(ROOT / rel)
+            assert "research|machine)" in src, (
+                f"{rel} does not list `machine` among the entity hash kinds"
+            )
+        assert _read(ROOT / "static" / "js" / "sessions.js").count(
+            "research|machine)"
+        ) == 2, "sessions.js has two inventories (boot restore + hashchange)"

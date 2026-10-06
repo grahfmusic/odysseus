@@ -24,7 +24,7 @@ import subprocess
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +344,60 @@ def audit(owner: str, server_id: str, event: str, command: str, exit_code: int) 
             ))
     except Exception as exc:
         logger.warning("ssh audit write failed: %s", exc)
+
+
+def server_meta(server_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    """Display metadata for server ids: ``{id: {"label", "port"}}``.
+
+    Best-effort by design — audit rows outlive their server (``server_id`` has no
+    FK), so a deleted machine simply has no entry. Never returns secrets.
+    """
+    from core.database import SshServer
+    ids = [str(i) for i in (server_ids or []) if i]
+    if not ids:
+        return {}
+    with _session() as db:
+        rows = db.query(SshServer).filter(SshServer.id.in_(ids)).all()
+        # Materialise INSIDE the session: after the block the instances are
+        # detached and expired, so touching r.label raises DetachedInstanceError.
+        return {r.id: {"label": r.label or "", "port": r.port} for r in rows}
+
+
+def list_audit(owner: str, limit: int = 50, event: Optional[str] = None,
+               server_id: Optional[str] = None, scope: str = "self") -> List[Dict[str, Any]]:
+    """Read the audit trail (machines-area-spec.md §8), newest first.
+
+    Owner-scoped unless ``scope="all"``, which returns every owner's rows and is
+    only reachable when the caller has already proven admin at the route layer.
+    Returns the command *hash* only: never command text, secrets or key material.
+    """
+    from core.database import SshAuditLog
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        n = 50
+    n = max(1, min(n, 200))
+    with _session() as db:
+        q = db.query(SshAuditLog)
+        if scope != "all":
+            q = q.filter(SshAuditLog.owner == owner)
+        if server_id:
+            q = q.filter(SshAuditLog.server_id == server_id)
+        if event:
+            q = q.filter(SshAuditLog.event == event)
+        rows = q.order_by(SshAuditLog.created_at.desc(), SshAuditLog.id).limit(n).all()
+        out = [{
+            "id": r.id,
+            "server_id": r.server_id,
+            "event": r.event,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "exit_code": r.exit_code,
+            "command_hash": r.command_hash,
+        } for r in rows]
+    labels = server_meta([r["server_id"] for r in out])
+    for r in out:
+        r["server_label"] = labels.get(r["server_id"] or "", {}).get("label", "")
+    return out
 
 
 # ---------------------------------------------------------------------------

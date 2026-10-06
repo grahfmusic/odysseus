@@ -171,7 +171,7 @@ async def do_list_ssh_servers(content: str, owner: Optional[str] = None) -> Dict
         return {"error": "owner is required", "exit_code": 1}
     servers = _ssh.list_servers(owner)
     if not servers:
-        return {"output": "No SSH servers saved. Add one in Cookbook → My servers.",
+        return {"output": "No SSH servers saved. Add one in Machines.",
                 "servers": [], "exit_code": 0}
     lines = [f"{len(servers)} saved SSH server(s):"]
     for s in servers:

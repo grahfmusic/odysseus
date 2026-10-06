@@ -384,7 +384,7 @@ import { loadPanel } from './panels.js';
     try {
       const hashId = String(window.location.hash || '').replace(/^#/, '').trim();
       if (!hashId) return '';
-      if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId) || /^open=notes&note=/.test(hashId)) return '';
+      if (/^(document|note|image|email|event|task|skill|research|machine)-/.test(hashId) || /^open=notes&note=/.test(hashId)) return '';
       return hashId;
     } catch (_) {
       return '';

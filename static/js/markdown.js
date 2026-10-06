@@ -666,7 +666,7 @@ export function mdToHtml(src, opts) {
   // right but slip into other formats when listing many in a table.
   // These regexes upgrade the broken forms to proper markdown links so
   // the standard `[text](url)` handler below picks them up.
-  const ANCHOR_KIND = '(?:session|document|note|image|email|event|task|skill|research)';
+  const ANCHOR_KIND = '(?:session|document|note|image|email|event|task|skill|research|machine)';
   // Case A: `[Name] [#kind-id]` — agent put the URL in brackets, often
   // in a table cell next to the label. Pair them.
   s = s.replace(

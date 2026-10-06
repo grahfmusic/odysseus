@@ -65,6 +65,11 @@ const PRECACHE = [
   '/static/js/chatStream.js',
   '/static/js/chat.js',
   '/static/js/cookbook.js',
+  // Machines area (eagerly imported by app.js) and its body layer. sshServers.js
+  // was previously in neither list even though cookbook.js imported it, so the
+  // old SSH panel could fail offline; both belong in PRECACHE, not PANEL_PRECACHE.
+  '/static/js/machines.js',
+  '/static/js/sshServers.js',
   '/static/js/search-chat.js',
   '/static/js/compare/index.js',
   '/static/js/theme.js',

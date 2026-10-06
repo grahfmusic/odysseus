@@ -1716,7 +1716,7 @@ export async function loadSessions() {
     const _isTransient = (s) => !!s && (s.folder === 'Assistant' || s.folder === 'Tasks');
     const _realSessions = activeSessions.filter(s => !_isTransient(s));
     let hashId = window.location.hash.replace('#', '');
-    if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId) || /^open=notes&note=/.test(hashId)) {
+    if (/^(document|note|image|email|event|task|skill|research|machine)-/.test(hashId) || /^open=notes&note=/.test(hashId)) {
       hashId = '';
     }
     const _isFirstLoad = !sessionStorage.getItem('ody-session-active');
@@ -2540,7 +2540,7 @@ export function initDragSort() {
 // session navigation (which would reset the active chat).
 window.addEventListener('hashchange', () => {
   const hashId = window.location.hash.replace('#', '');
-  if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId) || /^open=notes&note=/.test(hashId)) return;
+  if (/^(document|note|image|email|event|task|skill|research|machine)-/.test(hashId) || /^open=notes&note=/.test(hashId)) return;
   if (hashId && hashId !== currentSessionId) {
     const target = sessions.find(s => s.id === hashId && !s.archived);
     if (target) selectSession(hashId);
