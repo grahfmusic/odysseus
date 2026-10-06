@@ -1,7 +1,7 @@
 """Focused tests for ``deploy.sh``.
 
 ``deploy.sh`` is the single entrypoint for both deployment paths, so a bad edit
-can silently deploy the wrong thing. These tests pin the three parts where that
+can silently deploy the wrong thing. These tests pin the four parts where that
 would happen:
 
 * mode resolution — auto picks Docker only when the daemon really answers, and
@@ -9,21 +9,26 @@ would happen:
 * flag validation — a typo or a missing value fails loudly instead of falling
   through to a default deploy;
 * systemd unit generation — the unit matches the resolved bind and port, and
-  ``--dry-run`` prints it without writing anything to disk.
+  ``--dry-run`` prints it without writing anything to disk;
+* the Docker health probe — a status code is read from the app, so a container
+  that is merely listening (or answering 5xx) is never reported as healthy.
 
 Nothing here touches the Docker daemon or a real Python environment: a fake
-``docker`` executable on ``PATH`` stands in for the daemon, and native-mode
-deploys run against a throwaway project whose interpreter is a stub. The suite
+``docker`` executable on ``PATH`` stands in for the daemon, native-mode deploys
+run against a throwaway project whose interpreter is a stub, and the HTTP
+servers the health-probe tests dial are throwaway loopback servers. The suite
 therefore runs anywhere, including machines without Docker.
 """
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.server
 import os
 import shutil
 import socket
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -99,6 +104,38 @@ def listening(port: int):
         sock.close()
 
 
+@contextlib.contextmanager
+def http_server(status: int = 200):
+    """A throwaway HTTP server that answers every request with ``status``.
+
+    The probe speaks HTTP/1.0 and closes the connection after each request while
+    the wait loop redials, so the server has to serve several sequential
+    requests: ThreadingHTTPServer keeps a retry from queueing behind the socket
+    the previous one left open.
+    """
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - the name is fixed by the base class
+            self.send_response(status)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):  # a chatty server would litter pytest output
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def make_native_project(tmp_path: Path) -> Path:
     """A throwaway project holding only what a native deploy reads.
 
@@ -123,6 +160,21 @@ def make_native_project(tmp_path: Path) -> Path:
         stub.chmod(0o755)
 
     (project / "setup.py").write_text("# stub\n", encoding="utf-8")
+    return project
+
+
+def make_docker_project(tmp_path: Path) -> Path:
+    """A throwaway project for Docker-mode runs.
+
+    ``deploy.sh`` resolves its repo dir from its own location, so running a copy
+    keeps ``docker_ensure_env`` from ever creating a ``.env`` in the real
+    checkout. There is no ``.env.example`` or ``docker-compose.yml`` here, so
+    nothing is written beside it either, and the fake ``docker`` on ``PATH``
+    stands in for the daemon.
+    """
+    project = tmp_path / "docker-project"
+    project.mkdir()
+    shutil.copy2(DEPLOY, project / "deploy.sh")
     return project
 
 
@@ -351,3 +403,108 @@ def test_native_logs_dry_run_does_not_follow_the_log(tmp_path):
 
     assert proc.returncode == 0
     assert "[dry-run] tail -n 120 -f" in proc.stdout
+
+
+# --------------------------------------------------------- docker health probe --
+# The Docker health check used to be a TCP connect, which cannot tell a working
+# UI from a container that is up and failing every request. These pin the HTTP
+# contract: a status code is read back from the app, and only 2xx/3xx counts.
+# 302 is the case worth stating — with auth on, `/` redirects to /login, and that
+# is a healthy answer, not a failure.
+
+
+@pytest.mark.parametrize("code", [200, 302])
+def test_docker_status_accepts_a_served_response(fake_docker, tmp_path, code):
+    project = make_docker_project(tmp_path)
+
+    with http_server(code) as port:
+        proc = run_deploy(
+            ["--docker", "status", "--port", str(port)],
+            script=project / "deploy.sh",
+            env=env_with_path(fake_docker),
+        )
+
+    assert proc.returncode == 0
+    assert "✓ web UI answers on" in proc.stdout
+    assert f"HTTP {code}" in proc.stdout
+
+
+@pytest.mark.parametrize("code", [404, 500, 503])
+def test_docker_status_rejects_an_error_response(fake_docker, tmp_path, code):
+    project = make_docker_project(tmp_path)
+
+    with http_server(code) as port:
+        proc = run_deploy(
+            ["--docker", "status", "--port", str(port)],
+            script=project / "deploy.sh",
+            env=env_with_path(fake_docker),
+        )
+
+    assert proc.returncode == 0
+    assert "✓ web UI answers on" not in proc.stdout
+    assert f"HTTP {code}" in proc.stdout  # it names what it actually got
+
+
+def test_docker_status_rejects_a_listener_that_never_answers_http(fake_docker, tmp_path):
+    # The old check's blind spot: a socket that accepts the connection but never
+    # speaks HTTP is exactly what a port check called healthy.
+    project = make_docker_project(tmp_path)
+    port = free_port()
+
+    with listening(port):
+        proc = run_deploy(
+            ["--docker", "status", "--port", str(port)],
+            script=project / "deploy.sh",
+            env=env_with_path(fake_docker),
+        )
+
+    assert proc.returncode == 0
+    assert "✗ nothing answering on" in proc.stdout
+
+
+def test_docker_deploy_reports_the_status_code_of_a_healthy_app(fake_docker, tmp_path):
+    project = make_docker_project(tmp_path)
+
+    with http_server(200) as port:
+        proc = run_deploy(
+            ["--docker", "--port", str(port), "deploy"],
+            script=project / "deploy.sh",
+            env=env_with_path(fake_docker),
+        )
+
+    assert proc.returncode == 0
+    assert "✓ the app is answering (HTTP 200)" in proc.stdout
+
+
+def test_docker_deploy_does_not_report_success_for_a_server_error(fake_docker, tmp_path):
+    # The regression that motivated the change: `deploy` announced
+    # "✓ the app is answering" for anything that was merely listening. The
+    # timeout is shortened so the deploy gives up in a second rather than two
+    # minutes; the answer it saw is what makes the failure honest.
+    project = make_docker_project(tmp_path)
+
+    with http_server(500) as port:
+        proc = run_deploy(
+            ["--docker", "--port", str(port), "deploy"],
+            script=project / "deploy.sh",
+            env=env_with_path(fake_docker, ODYSSEUS_HEALTH_TIMEOUT="1"),
+        )
+
+    assert proc.returncode == 0
+    assert "✓ the app is answering" not in proc.stdout
+    assert "HTTP 500" in proc.stderr
+
+
+def test_health_timeout_must_be_a_whole_number(fake_docker, tmp_path):
+    # Bash reads a non-numeric value as an unset variable, so a typo would wait
+    # zero seconds and report a working app as broken. Fail loudly instead.
+    project = make_docker_project(tmp_path)
+
+    proc = run_deploy(
+        ["--docker", "status"],
+        script=project / "deploy.sh",
+        env=env_with_path(fake_docker, ODYSSEUS_HEALTH_TIMEOUT="soon"),
+    )
+
+    assert proc.returncode == 1
+    assert "ODYSSEUS_HEALTH_TIMEOUT must be a whole number" in proc.stderr

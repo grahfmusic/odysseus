@@ -35,7 +35,9 @@
 #   --dry-run                     print every command instead of running it
 #   -h | --help                   this text
 #
-# Environment overrides: ODYSSEUS_MODE, ODYSSEUS_HOST, ODYSSEUS_PORT
+# Environment overrides: ODYSSEUS_MODE, ODYSSEUS_HOST, ODYSSEUS_PORT,
+#                        ODYSSEUS_HEALTH_TIMEOUT (seconds to wait for the app to
+#                        answer HTTP; Docker mode, default 120)
 #
 # Every step is idempotent and nothing here deletes data. The script never
 # rewrites an existing .env, and it never runs sudo: when a step needs root it
@@ -77,6 +79,7 @@ MODE="${ODYSSEUS_MODE:-}"
 VERB="deploy"
 HOST_OPT=""
 PORT_OPT=""
+HEALTH_READ_TIMEOUT=5   # seconds to wait for one HTTP status line
 
 VERBS="deploy stop restart status logs update"
 
@@ -133,6 +136,72 @@ wait_for_port() {
     return 1
 }
 
+# ------------------------------------------------------------- health probes --
+# "Is it up?" is an HTTP question, not a TCP one. Docker publishes the port
+# mapping the moment the container starts, so a connect succeeds even while the
+# app is failing every request: a startup migration that did not finish, a
+# missing dependency, or the missing static bundle that makes serve_index()
+# answer 500 on `/` (that is a broken deployment, deliberately not a 404). The
+# Docker health check therefore reads the real HTTP status line.
+#
+# Speaking HTTP over /dev/tcp adds no dependency: /dev/tcp is already how
+# port_open() works, so no curl, no python and no `docker exec` are needed.
+#
+# Healthy means the app answered HTTP and did not report an error: 2xx is a
+# served page (AUTH_ENABLED=false) and 3xx is the redirect to /login, which is
+# the normal answer on `/` whenever auth is on. 4xx/5xx — or no response at all
+# — mean the UI does not work, which is the case a port check cannot see.
+healthy_code() {
+    local code="$1"
+    [ -n "$code" ] || return 1
+    [ "$code" -ge 200 ] && [ "$code" -lt 400 ]
+}
+
+# Prints the HTTP status code (e.g. 302) and returns 0, or prints nothing and
+# returns 1 when the probe could not get a status line at all. The body is a
+# subshell so fd 3 is never left behind in the caller — the same reason
+# port_open() is written as `( exec 3<>... )`.
+http_status() (
+    local host="$1" port="$2" path="${3:-/}" line="" rest="" code=""
+    exec 3<>"/dev/tcp/$host/$port" 2>/dev/null || exit 1
+    printf 'GET %s HTTP/1.0\r\nHost: %s:%s\r\nUser-Agent: odysseus-deploy\r\nConnection: close\r\n\r\n' \
+        "$path" "$host" "$port" >&3 2>/dev/null || exit 1
+    # A server that accepts the connection but never answers must not hang the
+    # deploy: read at most one line, for at most HEALTH_READ_TIMEOUT seconds.
+    IFS= read -r -t "$HEALTH_READ_TIMEOUT" line <&3 || exit 1
+    line="${line%$'\r'}"
+    case "$line" in HTTP/*) ;; *) exit 1 ;; esac
+    rest="${line#HTTP/}"    # `1.1 302 Found`
+    rest="${rest#* }"        # `302 Found`
+    code="${rest%% *}"       # `302`
+    case "$code" in ''|*[!0-9]*) exit 1 ;; esac
+    printf '%s' "$code"
+)
+
+# Wait for a healthy response, bounded by wall-clock rather than by attempts: a
+# probe against a socket that accepts but never answers costs the read timeout,
+# so counting attempts would multiply the budget by that. Prints the last status
+# code seen (empty when nothing answered) and returns 0 only when it was healthy.
+wait_for_http() {
+    # Two `local`s on purpose: an assignment in a `local` list only takes effect
+    # after the whole list, so `deadline` would otherwise read an unset timeout
+    # and trip `set -u` (shellcheck SC2318).
+    local host="$1" port="$2" timeout="${3:-120}" code=""
+    local deadline=$(( SECONDS + timeout ))
+    while :; do
+        code="$(http_status "$host" "$port" || true)"
+        if healthy_code "$code"; then
+            printf '%s' "$code"
+            return 0
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            printf '%s' "$code"
+            return 1
+        fi
+        sleep 1
+    done
+}
+
 pid_alive() {
     local file="$1" pid=""
     [ -f "$file" ] || return 1
@@ -187,6 +256,14 @@ PORT="$PORT_OPT"
 [ -n "$PORT" ] || PORT="${APP_PORT:-}"
 [ -n "$PORT" ] || PORT="$(env_value APP_PORT)"
 [ -n "$PORT" ] || PORT="7000"
+
+# How long the Docker health check waits in total. Validated because bash would
+# read a non-numeric value as an unset variable, i.e. silently wait zero
+# seconds and report a working app as broken.
+HEALTH_TIMEOUT="${ODYSSEUS_HEALTH_TIMEOUT:-120}"
+case "$HEALTH_TIMEOUT" in
+    ''|*[!0-9]*) die "ODYSSEUS_HEALTH_TIMEOUT must be a whole number of seconds (got: $HEALTH_TIMEOUT)" ;;
+esac
 
 AUTH_ENABLED="$(env_value AUTH_ENABLED)"
 # Absent from .env means the app's own default applies, which is enabled.
@@ -273,6 +350,7 @@ docker_export_bind() {
 }
 
 docker_deploy() {
+    local code=""
     command -v docker >/dev/null 2>&1 \
         || die "Docker is not installed. Install Docker, or run: ./deploy.sh --native"
     docker info >/dev/null 2>&1 \
@@ -311,11 +389,18 @@ docker_deploy() {
 
     step "Waiting for the web UI on $PROBE_HOST:$PORT"
     if [ "$DRY_RUN" = 1 ]; then
-        log "   [dry-run] wait_for_port $PROBE_HOST $PORT"
-    elif wait_for_port "$PROBE_HOST" "$PORT" 120; then
-        log "  ✓ the app is answering"
+        log "   [dry-run] wait_for_http $PROBE_HOST $PORT $HEALTH_TIMEOUT"
+    elif code="$(wait_for_http "$PROBE_HOST" "$PORT" "$HEALTH_TIMEOUT")"; then
+        log "  ✓ the app is answering (HTTP $code)"
     else
-        warn "The app did not answer within 120s. Inspect the logs:"
+        # Report what the app actually answered: a 5xx is a broken app, not a
+        # slow boot, and the two need different fixes.
+        if [ -n "$code" ]; then
+            warn "The app answered HTTP $code on http://$PROBE_HOST:$PORT — that is an error response."
+        else
+            warn "The app did not answer HTTP on http://$PROBE_HOST:$PORT within ${HEALTH_TIMEOUT}s."
+        fi
+        warn "Inspect the logs:"
         warn "  ${COMPOSE_CMD[*]} logs --tail=120 odysseus"
         return 0
     fi
@@ -337,8 +422,12 @@ docker_status() {
     docker_export_bind
     step "Compose services"
     run "${COMPOSE_CMD[@]}" ps
-    if port_open "$PROBE_HOST" "$PORT"; then
-        log "  ✓ web UI answers on http://$PROBE_HOST:$PORT"
+    local code=""
+    code="$(http_status "$PROBE_HOST" "$PORT" || true)"
+    if healthy_code "$code"; then
+        log "  ✓ web UI answers on http://$PROBE_HOST:$PORT (HTTP $code)"
+    elif [ -n "$code" ]; then
+        log "  ✗ http://$PROBE_HOST:$PORT answered HTTP $code — not a working UI"
     else
         log "  ✗ nothing answering on http://$PROBE_HOST:$PORT"
     fi
