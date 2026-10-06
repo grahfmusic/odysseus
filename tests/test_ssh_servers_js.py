@@ -36,7 +36,7 @@ def _run_node(body: str) -> dict:
 
     script = f"""
 import {{ sshServerPayload, sshTestMessage, sshErrorText, sshServerRowHtml,
-        sshServersListHtml }} from './sshServers.js';
+        sshServersListHtml, parseSshSse }} from './sshServers.js';
 {body}
 """
     with tempfile.TemporaryDirectory() as td:
@@ -124,11 +124,11 @@ console.log(JSON.stringify(sshServerRowHtml({
         assert "<img" not in out
         assert "&lt;img src=x onerror=alert(1)&gt;" in out
 
-    def test_row_exposes_every_phase1_action(self):
+    def test_row_exposes_every_action(self):
         out = _run_node("""
 console.log(JSON.stringify(sshServerRowHtml({ id: 's1', label: 'H', host: 'h', port: 22 })));
 """)
-        for action in ("test", "run", "key", "edit", "delete"):
+        for action in ("test", "connect", "run", "key", "edit", "delete"):
             assert f'data-ssh-action="{action}"' in out
         assert 'data-id="s1"' in out
         assert "not pinned" in out
@@ -148,6 +148,68 @@ console.log(JSON.stringify([sshServersListHtml([]),
         assert out[0].count("data-ssh-row=") == 0
         assert out[1] is True
         assert out[2] == 2
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+class TestTerminalFrames:
+    """The SSE relay parser must mirror the server's frame shape exactly.
+
+    Frames are built with ``JSON.stringify`` in the node half so the expected
+    bytes are the server's own shape, not a hand-escaped approximation.
+    """
+
+    _HELPERS = """
+const NL = String.fromCharCode(10);
+const frame = (o) => 'data: ' + JSON.stringify(o) + NL + NL;
+"""
+
+    def test_parses_stream_frames_and_keeps_the_partial_tail(self):
+        out = _run_node(self._HELPERS + """
+const text = frame({ stream: 'stdout', data: 'hi' + NL }) +
+             'data: ' + JSON.stringify({ stream: 'stdout', data: 'par' });
+const parsed = parseSshSse(text);
+console.log(JSON.stringify(parsed));
+""")
+        assert out["events"] == [{"stream": "stdout", "data": "hi\n"}]
+        assert out["rest"] == 'data: {"stream":"stdout","data":"par"}'
+
+    def test_parses_the_exit_frame(self):
+        out = _run_node(self._HELPERS + """
+const ev = parseSshSse(frame({ exit_code: 7 }));
+console.log(JSON.stringify([ev.events, ev.rest]));
+""")
+        assert out == [[{"exit_code": 7}], ""]
+
+    def test_multiple_frames_in_one_chunk(self):
+        out = _run_node(self._HELPERS + """
+const ev = parseSshSse(frame({ data: 'a' }) + frame({ data: 'b' }) + frame({ exit_code: 0 }));
+console.log(JSON.stringify(ev.events));
+""")
+        assert out == [{"data": "a"}, {"data": "b"}, {"exit_code": 0}]
+
+    def test_junk_frames_never_throw(self):
+        out = _run_node(self._HELPERS + """
+const ev = parseSshSse('data: not-json' + NL + NL + frame({ data: 'ok' }) +
+                       ': not a data line' + NL + NL);
+console.log(JSON.stringify(ev.events));
+""")
+        assert out == [{"data": "ok"}]
+
+    def test_stream_chunks_can_split_mid_frame(self):
+        """A TCP boundary inside a frame must not lose or corrupt it."""
+        out = _run_node(self._HELPERS + """
+const whole = frame({ stream: 'stdout', data: 'split' });
+const first = parseSshSse(whole.slice(0, 12));
+const second = parseSshSse(first.rest + whole.slice(12));
+console.log(JSON.stringify([first.events, second.events]));
+""")
+        assert out == [[], [{"stream": "stdout", "data": "split"}]]
+
+    def test_empty_and_null_input(self):
+        out = _run_node("""
+console.log(JSON.stringify([parseSshSse(''), parseSshSse(null), parseSshSse(undefined)]));
+""")
+        assert out == [{"events": [], "rest": ""}] * 3
 
 
 class TestModuleContract:
@@ -176,6 +238,36 @@ class TestModuleContract:
         # The panel may send a password, but no code path prints a stored one.
         assert "has_password" not in src
         assert "s.password" not in src
+
+
+class TestTerminalContract:
+    """Source-level pins for the terminal panel's request shape."""
+
+    def test_terminal_verbs_match_the_server_routes(self):
+        src = MODULE.read_text(encoding="utf-8")
+        assert "`/${encodeURIComponent(id)}/terminal`" in src           # POST open
+        assert "path + '/stream'" in src                               # GET stream
+        assert "path + '/input'" in src                                # POST input
+        assert "path + '/resize'" in src                               # POST resize
+        assert "{ method: 'DELETE' }" in src                           # DELETE close
+
+    def test_input_is_line_oriented_and_escaped_into_the_dom(self):
+        src = MODULE.read_text(encoding="utf-8")
+        # Output lands in a <pre> via textContent — never innerHTML.
+        assert "out.textContent += text;" in src
+        assert "out.innerHTML" not in src
+        assert "e.key !== 'Enter'" in src
+
+    def test_live_session_is_closed_when_the_panel_goes_away(self):
+        src = MODULE.read_text(encoding="utf-8")
+        assert "function _closeTerminal(d)" in src
+        # Reusing or hiding the detail panel must not orphan the remote PTY.
+        assert src.count("_closeTerminal(d);") >= 2
+        assert "t.controller.abort();" in src
+
+    def test_server_derived_strings_are_escaped(self):
+        src = MODULE.read_text(encoding="utf-8")
+        assert "const target = esc(info.target || 'remote');" in src
 
 
 class TestCookbookWiring:

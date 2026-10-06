@@ -589,12 +589,21 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
 # wraps remote output per prompt-security). Reachable via app_api: GET
 # list/detail/pubkey + POST test. Everything else under /api/ssh is refused.
 def _ssh_app_api_blocked(method: str, path: str) -> bool:
-    """True when an /api/ssh/* call must not go through the generic loopback."""
+    """True when an /api/ssh/* call must not go through the generic loopback.
+
+    Read-only endpoints (the server list and a server's public key) stay
+    reachable — they expose no secrets. Everything else is refused so the agent
+    must use the named `ssh_exec` tool, which carries the plan-mode gate and the
+    untrusted-output wrapping. The terminal relay (spec §6.3) is refused in both
+    directions: its SSE stream and its interactive input channel have no business
+    being driven by the loopback at all.
+    """
     if not path.startswith("/api/ssh/"):
         return False
+    clean = path.rstrip("/")
     if method == "GET":
-        return False
-    if method == "POST" and path.rstrip("/").endswith("/test"):
+        return "/terminal" in clean
+    if method == "POST" and clean.endswith("/test"):
         return False
     return True
 

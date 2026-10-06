@@ -28,6 +28,31 @@ has_sshd = bool(shutil.which("sshd"))
 has_ssh = bool(shutil.which("ssh"))
 
 
+def sftp_server_path() -> Optional[str]:
+    """Locate an sftp-server binary for the fixtures' `Subsystem sftp` line.
+
+    A custom sshd_config replaces the system one wholesale, and without an
+    explicit Subsystem line sshd has *no* sftp subsystem at all (the channel
+    closes on open), so SFTP tests must either wire one up or skip.
+    """
+    found = shutil.which("sftp-server")
+    if found:
+        return found
+    for candidate in (
+        "/usr/lib/openssh/sftp-server",
+        "/usr/lib/ssh/sftp-server",
+        "/usr/libexec/openssh/sftp-server",
+        "/usr/libexec/sftp-server",
+        "/usr/local/libexec/sftp-server",
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+has_sftp = sftp_server_path() is not None
+
+
 @dataclass
 class SshEndpoint:
     host: str
@@ -76,26 +101,45 @@ def _start_local_sshd(tmp_path: Path) -> Optional[tuple]:
     authorized.chmod(0o600)
     port = _free_port()
     cfg = tmp_path / "sshd_config"
-    cfg.write_text(
-        "\n".join([
-            f"Port {port}",
-            "ListenAddress 127.0.0.1",
-            f"HostKey {host_key}",
-            f"AuthorizedKeysFile {authorized}",
-            "PasswordAuthentication no",
-            "KbdInteractiveAuthentication no",
-            "ChallengeResponseAuthentication no",
-            "StrictModes no",
-            "UsePAM no",
-            "PidFile " + str(tmp_path / "sshd.pid"),
-            "LogLevel ERROR",
-        ]) + "\n",
-        encoding="utf-8",
-    )
+    lines = [
+        f"Port {port}",
+        "ListenAddress 127.0.0.1",
+        f"HostKey {host_key}",
+        f"AuthorizedKeysFile {authorized}",
+        "PasswordAuthentication no",
+        "KbdInteractiveAuthentication no",
+        "ChallengeResponseAuthentication no",
+        "StrictModes no",
+        "UsePAM no",
+        # A test run dials this sshd a lot (well past the 10-concurrent default
+        # of MaxStartups), and sshd randomly drops connections over that limit —
+        # which surfaces as an intermittent "Error reading SSH protocol banner".
+        "MaxStartups 200:30:400",
+        "UseDNS no",
+        # A test run dials this sshd from one address far more than a person
+        # would, and OpenSSH >= 9.8 penalises a source for connections that
+        # never authenticate (ssh-keyscan probes one key type per connection).
+        # The penalty would randomly drop later connections, which reads as a
+        # flaky "Error reading SSH protocol banner" in whichever test is next.
+        "PerSourcePenalties no",
+        "PidFile " + str(tmp_path / "sshd.pid"),
+        "LogLevel DEBUG3" if os.environ.get("SSHD_TEST_LOG") else "LogLevel ERROR",
+    ]
+    sftp_server = sftp_server_path()
+    if sftp_server:
+        lines.append(f"Subsystem sftp {sftp_server}")
+    cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Keep the daemon's diagnostics when asked (SSHD_TEST_LOG): a dropped
+    # connection otherwise looks identical to a slow one from the client side.
+    log_path = os.environ.get("SSHD_TEST_LOG")
+    if log_path:
+        log_handle = open(log_path, "ab")
+    else:
+        log_handle = subprocess.DEVNULL
     try:
         proc = subprocess.Popen(
-            [sshd_bin, "-D", "-f", str(cfg)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [sshd_bin, "-D", "-e", "-f", str(cfg)],
+            stdout=log_handle, stderr=log_handle,
         )
     except OSError:
         return None

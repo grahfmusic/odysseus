@@ -50,7 +50,7 @@ Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration
 
 - **Chat + Agents** — local/API models, tools, MCP, files, shell, skills, and memory.
 - **Cookbook** — hardware-aware model recommendations, downloads, and serving.
-- **My servers (SSH)** — save your own SSH hosts and run commands on them from Cookbook → Settings → My servers, or via the agent's `ssh_exec` tool. Add a server, click **Test** to confirm the host key and pin its fingerprint, then **Run** a one-shot command (or **Key** to copy the generated public key / `ssh-copy-id` command). Servers are per-user: you only ever reach your own. Password auth and the interactive terminal arrive in a later phase.
+- **My servers (SSH)** — save your own SSH hosts and work on them from Cookbook → Settings → My servers, or run one-shot commands through the agent's `ssh_exec` tool. Add a server, click **Test** to confirm the host key and pin its fingerprint, then **Connect** for an interactive terminal, **Run** a one-shot command, or **Key** to copy the generated public key / `ssh-copy-id` command. Key and password logins both work (a password is used in-process and never appears on a command line); whether `sudo` works is decided by the remote host. Servers are per-user: you only ever reach your own, and every connection you make is recorded in the audit log.
 - **Deep Research** — multi-step web research with source reading and report generation.
 - **Compare** — blind side-by-side model testing and synthesis.
 - **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.

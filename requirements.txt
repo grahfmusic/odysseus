@@ -38,6 +38,11 @@ python-dateutil
 caldav
 cryptography
 bcrypt
+# SSH password auth, SFTP transfer, and the interactive terminal
+# (src/ssh_client.py). OpenSSH argv covers key-only one-shot/transfer; this is
+# what makes a stored password usable without putting a secret on a command
+# line or in the environment. Unpinned, like the rest of this file.
+paramiko
 # Built-in servers use the v1 low-level Server decorator API. MCP SDK v2 is a
 # breaking rewrite, so keep fresh installs on the maintained v1 line until the
 # servers are migrated together.

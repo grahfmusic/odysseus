@@ -1,6 +1,6 @@
 // ============================================
 // SSH SERVERS MODULE — "My servers"
-// Owner-scoped saved SSH servers (ssh-rsh-spec.md §8, Phase 1).
+// Owner-scoped saved SSH servers (ssh-rsh-spec.md §8, Phase 1 + Phase 2 terminal).
 // Talks to /api/ssh/servers. Deliberately separate from the Cookbook
 // Servers block above it: that list is shared GPU-infra state in
 // cookbook_state.json, this one is per-user rows in ssh_servers.
@@ -53,6 +53,27 @@ export function sshErrorText(payload, status) {
   return `HTTP ${status}`;
 }
 
+/**
+ * Split accumulated SSE text into parsed frames, returning the trailing partial
+ * chunk. Frames are the shape `routes/ssh_routes.py` emits (same as
+ * `shell_routes._generate_pty`): `data: {"stream":"stdout","data":...}` up to a
+ * final `data: {"exit_code":N}`. Unparsable frames are dropped, never thrown.
+ */
+export function parseSshSse(buf) {
+  const events = [];
+  let rest = String(buf == null ? '' : buf);
+  let idx;
+  while ((idx = rest.indexOf('\n\n')) !== -1) {
+    const chunk = rest.slice(0, idx);
+    rest = rest.slice(idx + 2);
+    for (const line of chunk.split('\n')) {
+      if (!line.startsWith('data: ')) continue;
+      try { events.push(JSON.parse(line.slice(6))); } catch { /* partial frame */ }
+    }
+  }
+  return { events, rest };
+}
+
 function _authLabel(s) {
   const a = String(s.auth_type || 'key');
   if (a === 'password') return 'password (Phase 2)';
@@ -83,6 +104,7 @@ export function sshServerRowHtml(s = {}) {
   if (s.last_test_result === 'ok') html += `<span style="font-size:10px;color:var(--green,#50fa7b);">✓</span>`;
   html += `<span style="margin-left:auto;display:inline-flex;gap:4px;align-items:center;">`;
   html += btn('test', 'Test', 'Open a connection and pin the host key');
+  html += btn('connect', 'Connect', 'Open an interactive terminal on this server');
   html += btn('run', 'Run', 'Run a one-shot command on this server');
   html += btn('key', 'Key', 'Show this user\'s public key');
   html += btn('edit', 'Edit', 'Edit server details');
@@ -131,13 +153,31 @@ function _detail(id) {
 function _showDetail(id, html) {
   const d = _detail(id);
   if (!d) return;
+  _closeTerminal(d);  // a live PTY must not keep running behind a new panel
   d.innerHTML = html;
   d.style.display = 'flex';
 }
 
 function _hideDetail(id) {
   const d = _detail(id);
-  if (d) { d.style.display = 'none'; d.innerHTML = ''; }
+  if (!d) return;
+  _closeTerminal(d);
+  d.style.display = 'none';
+  d.innerHTML = '';
+}
+
+/**
+ * Close the detail panel's terminal, if any. Aborting the stream makes the
+ * server's finally-block drop the remote PTY; the DELETE is the explicit path
+ * (and the audit record). Both are best-effort — the idle reaper is the net.
+ */
+function _closeTerminal(d) {
+  const t = d && d._sshTerminal;
+  if (!t) return;
+  d._sshTerminal = null;
+  try { t.controller.abort(); } catch { /* already aborted */ }
+  _api(`/${encodeURIComponent(t.serverId)}/terminal/${encodeURIComponent(t.sid)}`,
+       { method: 'DELETE' }).catch(() => {});
 }
 
 export async function refreshSshServers() {
@@ -225,6 +265,117 @@ async function _onKey(id) {
     _setStatus('Key unavailable');
     uiModule.showToast('Key unavailable: ' + err.message);
   }
+}
+
+function _terminalHtml(info = {}) {
+  const target = esc(info.target || 'remote');
+  const label = info.label ? ' \u00b7 ' + esc(info.label) : '';
+  let h = '<div class="ssh-t-wrap" style="display:flex;flex-direction:column;gap:4px;">';
+  h += `<div style="font-size:10px;opacity:0.7;font-family:var(--mono,monospace);">` +
+       `terminal: ${target}${label} \u2014 line input, Enter to send</div>`;
+  h += '<pre class="ssh-t-out" style="margin:0;max-height:260px;min-height:80px;overflow:auto;white-space:pre-wrap;' +
+       'word-break:break-all;font-family:var(--mono,monospace);font-size:11px;line-height:1.35;' +
+       'background:var(--bg-secondary,rgba(0,0,0,0.25));padding:6px;border-radius:4px;"></pre>';
+  h += '<div style="display:flex;gap:4px;align-items:center;">';
+  h += '<input class="memory-search-input ssh-t-in" placeholder="command (Enter to send)" ' +
+       'style="flex:1;height:23px;font-family:var(--mono,monospace);" />';
+  h += '<button type="button" class="memory-toolbar-btn ssh-t-disconnect" style="height:23px;">Disconnect</button>';
+  h += '</div>';
+  h += '<div class="ssh-t-status" style="font-size:10px;opacity:0.6;"></div>';
+  h += '</div>';
+  return h;
+}
+
+async function _onConnect(id) {
+  _setStatus('Connecting\u2026');
+  let info;
+  try {
+    info = await _api(`/${encodeURIComponent(id)}/terminal`,
+                      { method: 'POST', body: JSON.stringify({ cols: 100, rows: 30 }) });
+  } catch (err) {
+    _setStatus('');
+    uiModule.showToast('Connect failed: ' + err.message);
+    return;
+  }
+  const sid = info && info.session_id;
+  if (!sid) { _setStatus(''); uiModule.showToast('Connect failed: no session'); return; }
+
+  _showDetail(id, _terminalHtml(info));
+  const d = _detail(id);
+  const out = d.querySelector('.ssh-t-out');
+  const statusEl = d.querySelector('.ssh-t-status');
+  const input = d.querySelector('.ssh-t-in');
+  const path = `/${encodeURIComponent(id)}/terminal/${encodeURIComponent(sid)}`;
+  const controller = new AbortController();
+  d._sshTerminal = { sid, serverId: id, controller };
+  statusEl.textContent = 'connected';
+  _setStatus('');
+  try { input.focus(); } catch { /* not focusable in this context */ }
+
+  const append = (text) => {
+    out.textContent += text;
+    out.scrollTop = out.scrollHeight;
+  };
+
+  const stream = async () => {
+    let buf = '';
+    try {
+      const res = await fetch(API + path + '/stream',
+                              { credentials: 'same-origin', signal: controller.signal });
+      if (!res.ok || !res.body) { statusEl.textContent = 'stream unavailable'; return; }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parsed = parseSshSse(buf);
+        buf = parsed.rest;
+        for (const ev of parsed.events) {
+          if (!ev || typeof ev !== 'object') continue;
+          if (ev.data !== undefined && ev.data !== null) append(String(ev.data));
+          if (ev.exit_code !== undefined) {
+            statusEl.textContent = `session ended (exit ${ev.exit_code})`;
+            input.disabled = true;
+          }
+        }
+      }
+    } catch (err) {
+      if (!err || err.name !== 'AbortError') statusEl.textContent = 'stream error';
+    }
+  };
+  stream();
+
+  const sendInput = async (data) => {
+    try {
+      await _api(path + '/input', { method: 'POST', body: JSON.stringify({ data }) });
+    } catch (err) {
+      uiModule.showToast('Send failed: ' + err.message);
+    }
+  };
+  const sendResize = async () => {
+    const cols = Math.max(20, Math.min(400, Math.floor(out.clientWidth / 7) || 100));
+    const rows = Math.max(5, Math.min(200, Math.floor(out.clientHeight / 16) || 30));
+    try {
+      await _api(path + '/resize', { method: 'POST', body: JSON.stringify({ cols, rows }) });
+    } catch { /* resize is advisory; the PTY keeps its previous size */ }
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const line = input.value;
+    input.value = '';
+    append(line + '\n');
+    sendInput(line + '\n');
+  });
+  d.querySelector('.ssh-t-disconnect')?.addEventListener('click', async () => {
+    controller.abort();
+    try { await _api(path, { method: 'DELETE' }); } catch { /* already gone */ }
+    statusEl.textContent = 'disconnected';
+    input.disabled = true;
+    uiModule.showToast('Terminal closed');
+  });
+  sendResize();
 }
 
 function _onRun(id) {
@@ -338,6 +489,7 @@ export function initSshServers(body) {
       if (action === 'cancel') { _hideDetail(id); return; }
       if (action === 'test') { _onTest(id); return; }
       if (action === 'key') { _onKey(id); return; }
+      if (action === 'connect') { _onConnect(id); return; }
       if (action === 'run') { _onRun(id); return; }
       if (action === 'delete') { _onDelete(id); return; }
       if (action === 'edit') { _onEdit(id); return; }
