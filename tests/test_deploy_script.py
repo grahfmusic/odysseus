@@ -10,8 +10,9 @@ would happen:
   through to a default deploy;
 * systemd unit generation — the unit matches the resolved bind and port, and
   ``--dry-run`` prints it without writing anything to disk;
-* the Docker health probe — a status code is read from the app, so a container
-  that is merely listening (or answering 5xx) is never reported as healthy.
+* the health probe on BOTH paths — a status code is read from the app, so a
+  container or a uvicorn that is merely listening (or answering 5xx) is never
+  reported as healthy.
 
 Nothing here touches the Docker daemon or a real Python environment: a fake
 ``docker`` executable on ``PATH`` stands in for the daemon, native-mode deploys
@@ -312,9 +313,11 @@ def test_dry_run_prints_the_unit_without_writing_it(tmp_path):
 
 def test_systemd_writes_a_unit_for_the_resolved_bind_and_port(tmp_path):
     project = make_native_project(tmp_path)
-    port = free_port()
 
-    with listening(port):
+    # An HTTP server, not a bare listener: the native deploy now waits for a
+    # served response, so a socket that never speaks HTTP would leave this test
+    # sitting out the whole health timeout.
+    with http_server(200) as port:
         proc = run_deploy(
             [
                 "--native", "--no-chromadb", "--systemd",
@@ -354,9 +357,8 @@ def test_systemd_flag_is_inert_outside_a_native_deploy(tmp_path):
 )
 def test_generated_unit_passes_systemd_analyze(tmp_path):
     project = make_native_project(tmp_path)
-    port = free_port()
 
-    with listening(port):
+    with http_server(200) as port:
         proc = run_deploy(
             ["--native", "--no-chromadb", "--systemd", "--port", str(port), "deploy"],
             script=project / "deploy.sh",
@@ -403,6 +405,92 @@ def test_native_logs_dry_run_does_not_follow_the_log(tmp_path):
 
     assert proc.returncode == 0
     assert "[dry-run] tail -n 120 -f" in proc.stdout
+
+
+# --------------------------------------------------------- native health probe --
+# The native path waited for the port with a TCP connect, so a uvicorn that had
+# bound but could not serve — the same blind spot Docker mode had — was reported
+# as "the app is answering". Both paths now ask the app for a status line.
+
+
+def test_native_status_accepts_a_served_response(tmp_path):
+    project = make_native_project(tmp_path)
+
+    with http_server(302) as port:
+        proc = run_deploy(["--native", "--port", str(port), "status"],
+                          script=project / "deploy.sh")
+
+    assert proc.returncode == 0
+    assert "✓ web UI answers on" in proc.stdout
+    assert "HTTP 302" in proc.stdout
+
+
+def test_native_status_rejects_an_error_response(tmp_path):
+    project = make_native_project(tmp_path)
+
+    with http_server(500) as port:
+        proc = run_deploy(["--native", "--port", str(port), "status"],
+                          script=project / "deploy.sh")
+
+    assert proc.returncode == 0
+    assert "✓ web UI answers on" not in proc.stdout
+    assert "HTTP 500" in proc.stdout  # it names what it actually got
+
+
+def test_native_status_rejects_a_listener_that_never_answers_http(tmp_path):
+    project = make_native_project(tmp_path)
+    port = free_port()
+
+    with listening(port):
+        proc = run_deploy(["--native", "--port", str(port), "status"],
+                          script=project / "deploy.sh")
+
+    assert proc.returncode == 0
+    assert "✗ nothing answering on" in proc.stdout
+
+
+def test_a_closed_port_is_reported_without_shell_noise(tmp_path):
+    # A closed port is an expected answer, not a crash: bash's own
+    # "connect: Connection refused" for the /dev/tcp redirection must not reach
+    # stderr, or every status run on a stopped app looks like a script error.
+    project = make_native_project(tmp_path)
+    port = free_port()
+
+    proc = run_deploy(["--native", "--port", str(port), "status"],
+                      script=project / "deploy.sh")
+
+    assert proc.returncode == 0
+    assert "✗ nothing answering on" in proc.stdout
+    assert "Connection refused" not in proc.stderr
+    assert "/dev/tcp" not in proc.stderr
+
+
+def test_native_deploy_reports_the_status_code_of_a_healthy_app(tmp_path):
+    project = make_native_project(tmp_path)
+
+    with http_server(200) as port:
+        proc = run_deploy(["--native", "--no-chromadb", "--port", str(port), "deploy"],
+                          script=project / "deploy.sh")
+
+    assert proc.returncode == 0
+    assert "✓ the app is answering (HTTP 200)" in proc.stdout
+
+
+def test_native_deploy_does_not_report_success_for_a_server_error(tmp_path):
+    # The stub "uvicorn" exits immediately, so nothing real is listening: the
+    # server answering 500 here is the case that must not read as healthy.
+    project = make_native_project(tmp_path)
+
+    with http_server(500) as port:
+        proc = run_deploy(
+            ["--native", "--no-chromadb", "--port", str(port), "deploy"],
+            script=project / "deploy.sh",
+            env=dict(os.environ, ODYSSEUS_HEALTH_TIMEOUT="1"),
+        )
+
+    assert proc.returncode == 0
+    assert "✓ the app is answering" not in proc.stdout
+    assert "HTTP 500" in proc.stderr
 
 
 # --------------------------------------------------------- docker health probe --

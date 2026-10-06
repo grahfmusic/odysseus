@@ -37,7 +37,7 @@
 #
 # Environment overrides: ODYSSEUS_MODE, ODYSSEUS_HOST, ODYSSEUS_PORT,
 #                        ODYSSEUS_HEALTH_TIMEOUT (seconds to wait for the app to
-#                        answer HTTP; Docker mode, default 120)
+#                        answer HTTP; both modes, default 120)
 #
 # Every step is idempotent and nothing here deletes data. The script never
 # rewrites an existing .env, and it never runs sudo: when a step needs root it
@@ -127,22 +127,15 @@ env_value() {
 
 port_open() { (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null; }
 
-wait_for_port() {
-    local host="$1" port="$2" tries="${3:-90}" i
-    for ((i = 0; i < tries; i++)); do
-        port_open "$host" "$port" && return 0
-        sleep 1
-    done
-    return 1
-}
-
 # ------------------------------------------------------------- health probes --
-# "Is it up?" is an HTTP question, not a TCP one. Docker publishes the port
-# mapping the moment the container starts, so a connect succeeds even while the
-# app is failing every request: a startup migration that did not finish, a
-# missing dependency, or the missing static bundle that makes serve_index()
-# answer 500 on `/` (that is a broken deployment, deliberately not a 404). The
-# Docker health check therefore reads the real HTTP status line.
+# "Is it up?" is an HTTP question, not a TCP one, and that holds on both paths.
+# Docker publishes the port mapping the moment the container starts, so a connect
+# succeeds even while the app is failing every request; natively, uvicorn binds
+# the port before the app is importable and answers 500 while it is broken. Either
+# way a connect says nothing about whether the UI works: a startup migration that
+# did not finish, a missing dependency, or the missing static bundle that makes
+# serve_index() answer 500 on `/` (that is a broken deployment, deliberately not a
+# 404). Both health checks therefore read the real HTTP status line.
 #
 # Speaking HTTP over /dev/tcp adds no dependency: /dev/tcp is already how
 # port_open() works, so no curl, no python and no `docker exec` are needed.
@@ -163,7 +156,11 @@ healthy_code() {
 # port_open() is written as `( exec 3<>... )`.
 http_status() (
     local host="$1" port="$2" path="${3:-/}" line="" rest="" code=""
-    exec 3<>"/dev/tcp/$host/$port" 2>/dev/null || exit 1
+    # The connect is wrapped in a group whose stderr is already redirected:
+    # attaching `2>/dev/null` to the `exec` itself is too late — bash reports the
+    # /dev/tcp failure, and a closed port would litter every `status` run with
+    # "connect: Connection refused" for a case the caller expects and reports.
+    if ! { exec 3<>"/dev/tcp/$host/$port"; } 2>/dev/null; then exit 1; fi
     printf 'GET %s HTTP/1.0\r\nHost: %s:%s\r\nUser-Agent: odysseus-deploy\r\nConnection: close\r\n\r\n' \
         "$path" "$host" "$port" >&3 2>/dev/null || exit 1
     # A server that accepts the connection but never answers must not hang the
@@ -559,6 +556,7 @@ native_chromadb_start() {
 }
 
 native_deploy() {
+    local code=""
     step "Deploying natively (venv + uvicorn)"
     native_venv
     native_setup
@@ -597,11 +595,21 @@ native_deploy() {
         >>"$APP_LOG" 2>&1 &
     printf '%s' "$!" > "$APP_PID_FILE"
 
-    if wait_for_port "$PROBE_HOST" "$PORT" 60; then
-        log "  ✓ the app is answering"
+    # Same probe as Docker mode (see wait_for_http): a bound socket is not a
+    # working UI, and uvicorn binds before the app finishes importing.
+    step "Waiting for the web UI on $PROBE_HOST:$PORT"
+    if code="$(wait_for_http "$PROBE_HOST" "$PORT" "$HEALTH_TIMEOUT")"; then
+        log "  ✓ the app is answering (HTTP $code)"
         print_url_block
     else
-        warn "Odysseus did not answer within 60s. Check the log:"
+        # Report what the app actually answered: a 5xx is a broken app, not a
+        # slow boot, and the two need different fixes.
+        if [ -n "$code" ]; then
+            warn "The app answered HTTP $code on http://$PROBE_HOST:$PORT — that is an error response."
+        else
+            warn "The app did not answer HTTP on http://$PROBE_HOST:$PORT within ${HEALTH_TIMEOUT}s."
+        fi
+        warn "Check the log:"
         warn "  tail -n 80 $APP_LOG"
         return 0
     fi
@@ -645,8 +653,12 @@ native_status() {
     if pid_alive "$CHROMA_PID_FILE"; then
         log "  ✓ ChromaDB running (pid $(cat "$CHROMA_PID_FILE"))  log: $CHROMA_LOG"
     fi
-    if port_open "$PROBE_HOST" "$PORT"; then
-        log "  ✓ web UI answers on http://$PROBE_HOST:$PORT"
+    local code=""
+    code="$(http_status "$PROBE_HOST" "$PORT" || true)"
+    if healthy_code "$code"; then
+        log "  ✓ web UI answers on http://$PROBE_HOST:$PORT (HTTP $code)"
+    elif [ -n "$code" ]; then
+        log "  ✗ http://$PROBE_HOST:$PORT answered HTTP $code — not a working UI"
     else
         log "  ✗ nothing answering on http://$PROBE_HOST:$PORT"
     fi
