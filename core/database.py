@@ -8,8 +8,16 @@ from urllib.parse import unquote, urlparse
 from sqlalchemy import DDL, event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, inspect, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.types import TypeDecorator
-from sqlalchemy.ext.declarative import declarative_base, declared_attr
-from sqlalchemy.orm import relationship, sessionmaker, backref
+# declarative_base/declared_attr live in sqlalchemy.orm on SQLAlchemy 2.x;
+# sqlalchemy.ext.declarative is a compatibility shim that warns on both
+# (`MovedIn20Warning`, deprecated since 2.0).
+from sqlalchemy.orm import (
+    backref,
+    declarative_base,
+    declared_attr,
+    relationship,
+    sessionmaker,
+)
 
 from src.runtime_paths import get_app_root
 from core.platform_compat import safe_chmod, IS_WINDOWS
