@@ -149,6 +149,10 @@ export PATH="/app/.local/bin:$PATH"
 # || true so a setup failure never prevents the container from starting.
 "$GOSU_BIN" "$ODY_USER" "$PYTHON_BIN" /app/setup.py || true
 
+# Managed SSH identity dir for saved SSH servers (0700, app-user owned).
+# Keypairs are generated per-user on demand, not here.
+gosu "$PUID:$PGID" sh -c 'umask 077; mkdir -p /app/data/ssh /app/data/ssh/known_hosts.d' || true
+
 # Drop root and run the actual app. `gosu` is preferred over `su` /
 # `sudo` because it cleans up the process tree (no extra shell layer)
 # so signals (SIGTERM from `docker stop`) reach uvicorn directly.

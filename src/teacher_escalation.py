@@ -219,7 +219,9 @@ hardcode anything user-specific into the procedure:
   - NO direct `ssh <host> 'tmux ...'` shell incantations even if that's \
     what the failed trace did — those bypass the cookbook's state \
     tracker. The skill must use `serve_model` / `stop_served_model` \
-    / `serve_preset`, not bash.
+    / `serve_preset`, not bash. (For general commands on a user's OWN \
+    saved server — not model serving — the correct channel is the \
+    `ssh_exec` tool with a saved server label/id, never a raw host.)
 
 If you do NOT believe the task is solvable with the available tools, \
 output the explanation paragraph but OMIT the JSON block entirely. \

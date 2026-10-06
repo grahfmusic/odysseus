@@ -120,6 +120,7 @@ PLAN_MODE_READONLY_TOOLS = {
     "search_hf_models",
     "list_serve_presets",
     "list_cookbook_servers",
+    "list_ssh_servers",
     "resolve_contact",
     "chat_with_model",
     "ask_teacher",
@@ -163,6 +164,8 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "bash", "python",
     # Controls shell processes (kill); plan mode can't run bash anyway.
     "manage_bg_jobs",
+    # Remote execution mutates remote hosts; same rule as bash.
+    "ssh_exec",
 }
 
 

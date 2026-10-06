@@ -800,6 +800,10 @@ app.include_router(calendar_router)
 from routes.shell_routes import setup_shell_routes
 app.include_router(setup_shell_routes())
 
+# Saved SSH servers (owner-scoped remote shell)
+from routes.ssh_routes import setup_ssh_routes
+app.include_router(setup_ssh_routes())
+
 # Cookbook (model download/serve/cache, cookbook state sync)
 from routes.cookbook_routes import setup_cookbook_routes
 app.include_router(setup_cookbook_routes())
@@ -1051,6 +1055,13 @@ async def _startup_event():
             _db.close()
     except Exception as e:
         logger.debug(f"Incognito purge skipped: {e}")
+    # Ensure the managed SSH identity dir exists (data/ssh, 0700) for saved
+    # SSH servers. Keypairs are generated per-user on demand, not here.
+    try:
+        from src.ssh_remote import ensure_managed_ssh_dir
+        ensure_managed_ssh_dir()
+    except Exception as e:
+        logger.debug(f"SSH dir ensure skipped: {e}")
     # Strong refs to fire-and-forget startup tasks. Without this, Python may
     # GC tasks created with `asyncio.create_task(...)` before they finish.
     _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])

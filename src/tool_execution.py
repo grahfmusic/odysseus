@@ -106,6 +106,33 @@ _SENSITIVE_BASENAMES_CF: frozenset[str] = frozenset(b.casefold() for b in _SENSI
 _SENSITIVE_FILE_PATTERNS_CF: frozenset[str] = frozenset(p.casefold() for p in _SENSITIVE_FILE_PATTERNS)
 
 
+def _is_managed_ssh_path(resolved: str) -> bool:
+    """Narrow exception to the sensitive-path deny list for SSH (spec §6.4).
+
+    Only the app-managed identity dir (data/ssh ↔ /app/.ssh): per-user
+    `<owner>_ed25519*` key files (+ `.bak` rotations) and the per-server
+    `known_hosts.d/` pins. Everything else .ssh-shaped stays denied.
+    File tools are admin-only, so this exception's blast radius is admins.
+    """
+    try:
+        from src.constants import DATA_DIR
+        managed = os.path.realpath(os.path.join(DATA_DIR, "ssh"))
+    except Exception:
+        return False
+    try:
+        common = os.path.commonpath([resolved, managed])
+    except ValueError:
+        return False
+    if common != managed:
+        return False
+    rel = os.path.relpath(resolved, managed)
+    parts = rel.split(os.sep)
+    if parts[0] == "known_hosts.d":
+        return True
+    name = parts[-1]
+    return bool(re.match(r"^[A-Za-z0-9_.-]+_ed25519(\.pub|\.bak)*$", name))
+
+
 def _is_sensitive_path(resolved: str) -> bool:
     """Return True if *resolved* falls under a sensitive directory or
     matches a sensitive filename — regardless of what root it sits under.
@@ -377,7 +404,7 @@ def _resolve_tool_path(raw_path: str) -> str:
     expanded = os.path.expanduser(str(raw_path).strip())
     resolved = os.path.realpath(expanded)
 
-    if _is_sensitive_path(resolved):
+    if _is_sensitive_path(resolved) and not _is_managed_ssh_path(resolved):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
@@ -418,7 +445,7 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
     expanded = os.path.expanduser(str(raw_path).strip())
     candidate = expanded if os.path.isabs(expanded) else os.path.join(base, expanded)
     resolved = os.path.realpath(candidate)
-    if _is_sensitive_path(resolved):
+    if _is_sensitive_path(resolved) and not _is_managed_ssh_path(resolved):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
@@ -988,6 +1015,7 @@ async def _execute_tool_block_impl(
         do_list_downloads, do_cancel_download, do_search_hf_models, do_list_cached_models,
         do_list_serve_presets, do_serve_preset, do_adopt_served_model,
         do_list_cookbook_servers,
+        do_ssh_exec, do_list_ssh_servers,
         do_edit_image, do_trigger_research, do_manage_research, do_resolve_contact,
         do_manage_contact,
         do_vault_search, do_vault_get, do_vault_unlock,
@@ -1232,6 +1260,12 @@ async def _execute_tool_block_impl(
     elif tool == "list_cookbook_servers":
         desc = "list_cookbook_servers"
         result = await do_list_cookbook_servers(content, owner=owner)
+    elif tool == "ssh_exec":
+        desc = "ssh_exec"
+        result = await do_ssh_exec(content, owner=owner)
+    elif tool == "list_ssh_servers":
+        desc = "list_ssh_servers"
+        result = await do_list_ssh_servers(content, owner=owner)
     elif tool == "edit_image":
         desc = "edit_image"
         result = await do_edit_image(content, owner=owner)

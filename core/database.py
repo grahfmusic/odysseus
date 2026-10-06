@@ -645,6 +645,54 @@ class ApiToken(TimestampMixin, Base):
     last_used_at = Column(DateTime, nullable=True)
 
 
+class SshServer(TimestampMixin, Base):
+    """Owner-scoped saved SSH server. Secrets encrypted at rest.
+
+    Key material itself lives in data/ssh/<owner>_ed25519(.pub) (0600/0700);
+    only the filename is stored here. Fingerprint pinning per ssh spec §6.2.
+    """
+    __tablename__ = "ssh_servers"
+
+    id             = Column(String, primary_key=True, index=True)
+    owner          = Column(String, nullable=True, index=True)
+    label          = Column(String, nullable=False)
+    host           = Column(String, nullable=False)
+    port           = Column(Integer, default=22, nullable=False)
+    username       = Column(String, nullable=False, default="")
+    auth_type      = Column(String, nullable=False, default="key")  # key | password | both
+    password       = Column(EncryptedText, nullable=True)   # login password (Phase 2)
+    sudo_password  = Column(EncryptedText, nullable=True)   # optional escalation (Phase 2)
+    ssh_key_ref    = Column(String, nullable=True)          # e.g. "<owner>_ed25519"
+    host_key_fingerprint = Column(String, nullable=True)    # pinned TOFU fingerprint
+    last_tested_at = Column(DateTime, nullable=True)
+    last_test_result = Column(String, nullable=True)        # e.g. "ok" / error short string
+
+    __table_args__ = (
+        Index('ix_ssh_servers_owner_label', 'owner', 'label'),
+    )
+
+
+class SshAuditLog(TimestampMixin, Base):
+    """Append-only audit of SSH test/exec/terminal/transfer events.
+
+    Never stores secrets — command text is stored as a SHA-256 hash.
+    server_id is a plain indexed String (no FK) so audit rows survive
+    server deletion.
+    """
+    __tablename__ = "ssh_audit_log"
+
+    id           = Column(String, primary_key=True, index=True)
+    owner        = Column(String, nullable=True, index=True)
+    server_id    = Column(String, nullable=True, index=True)
+    event        = Column(String, nullable=False)  # test | exec | terminal_open | upload | download | key_rotated | server_deleted
+    command_hash = Column(String, nullable=True)   # SHA-256 hex of command text, if any
+    exit_code    = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index('ix_ssh_audit_owner_created', 'owner', 'created_at'),
+    )
+
+
 class Webhook(TimestampMixin, Base):
     """Outgoing webhooks fired on events."""
     __tablename__ = "webhooks"
