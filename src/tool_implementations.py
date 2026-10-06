@@ -6,7 +6,7 @@ These handle the actual execution logic for each tool type.
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.tool_utils import get_mcp_manager  # re-exported: tests patch src.tool_implementations.get_mcp_manager
 
@@ -668,9 +668,14 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
         # set/get/list/delete operate on the REAL app settings (the same store
         # the Settings panel writes), so changing a model / voice / search
         # engine / reminder channel from chat actually takes effect.
-        from src.settings import load_settings, save_settings, DEFAULT_SETTINGS
+        from src.settings import (
+            DEFAULT_SETTINGS,
+            RETIRED_SETTING_KEYS,
+            load_settings,
+            save_settings,
+        )
 
-        # Secrets/credentials the agent must NOT write — kept read-only (masked)
+        # Secrets/credentials the agent must NOT write: kept read-only (masked)
         # so API keys never flow through chat. User sets these in the panel.
         _SECRET_KEYS = {
             "brave_api_key", "google_pse_key", "google_pse_cx",
@@ -719,6 +724,9 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             if k2 in DEFAULT_SETTINGS:
                 return k2
             return _ALIASES_SET.get(k2, (k or "").strip())
+
+        def _is_managed_key(key):
+            return key in DEFAULT_SETTINGS and key not in RETIRED_SETTING_KEYS
 
         _ENUMS = {
             "image_quality": ["low", "medium", "high"],
@@ -782,14 +790,18 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
 
         if action == "list":
             s = load_settings()
-            shown = {k: _mask(k, v) for k, v in s.items() if k in DEFAULT_SETTINGS and not isinstance(v, dict)}
+            shown = {
+                k: _mask(k, v)
+                for k, v in s.items()
+                if _is_managed_key(k) and not isinstance(v, dict)
+            }
             return {"response": f"{len(shown)} settings (use get/set with a key)", "settings": shown, "exit_code": 0}
 
         elif action == "get":
             key = _resolve(args.get("key", ""))
             if not key:
                 return {"error": "key is required", "exit_code": 1}
-            if key not in DEFAULT_SETTINGS:
+            if not _is_managed_key(key):
                 return {"error": f"Unknown setting '{args.get('key')}'. Use action='list' to see them.", "exit_code": 1}
             val = load_settings().get(key, DEFAULT_SETTINGS.get(key))
             return {"response": f"{key} = {_mask(key, val)}", "value": _mask(key, val), "exit_code": 0}
@@ -800,17 +812,17 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             if not raw:
                 return {"error": "key is required", "exit_code": 1}
             key = _resolve(raw)
-            if key not in DEFAULT_SETTINGS:
+            if not _is_managed_key(key):
                 return {"error": f"Unknown setting '{raw}'. Use action='list' to see available settings.", "exit_code": 1}
             if _is_secret(key):
-                return {"response": f"'{key}' is a credential/secret — for security I can't set it from chat. Open Settings and set it there.", "exit_code": 0}
-            # Structured settings (dicts/lists like keybinds, default_model_fallbacks)
-            # have no safe scalar coercion — _coerce would pass a bare string
+                return {"response": f"'{key}' is a credential/secret. For security I can't set it from chat. Open Settings and set it there.", "exit_code": 0}
+            # Structured settings (dicts/lists like keybinds or vision fallbacks)
+            # have no safe scalar coercion; _coerce would pass a bare string
             # straight through and clobber the structure. Refuse them here; they're
             # edited in their dedicated panels. (reset/delete still restore the
             # default structure, which is safe.)
             if isinstance(DEFAULT_SETTINGS[key], (dict, list)):
-                return {"response": f"'{key}' is a structured setting — edit it in its panel, not from chat. (You can reset it to default here.)", "exit_code": 0}
+                return {"response": f"'{key}' is a structured setting. Edit it in its panel, not from chat. (You can reset it to default here.)", "exit_code": 0}
             try:
                 value = _coerce(value, DEFAULT_SETTINGS[key])
             except (ValueError, TypeError):
@@ -833,10 +845,10 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
 
         elif action == "delete" or action == "reset":
             key = _resolve(args.get("key", ""))
-            if key not in DEFAULT_SETTINGS:
+            if not _is_managed_key(key):
                 return {"error": f"Unknown setting '{args.get('key')}'.", "exit_code": 1}
             if _is_secret(key):
-                return {"response": f"'{key}' is a credential — reset it in the panel.", "exit_code": 0}
+                return {"response": f"'{key}' is a credential. Reset it in the panel.", "exit_code": 0}
             s = load_settings()
             s[key] = DEFAULT_SETTINGS[key]
             save_settings(s)
@@ -850,11 +862,12 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             # "documents" -> the document tool set, "memory" ->
             # manage_memory, etc.
             from src.settings import get_setting, save_settings, load_settings
+            from src.tool_security import BUILTIN_EMAIL_TOOLS
             _ALIASES = {
                 "shell": ["bash"],
                 "terminal": ["bash"],
-                "search": ["web_search"],
-                "web": ["web_search"],
+                "search": ["web_search", "web_fetch"],
+                "web": ["web_search", "web_fetch"],
                 "browser": ["builtin_browser"],
                 "documents": ["create_document", "edit_document", "update_document", "suggest_document"],
                 "doc": ["create_document", "edit_document", "update_document", "suggest_document"],
@@ -865,8 +878,15 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 "tasks": ["manage_tasks"],
                 "notes": ["manage_notes"],
                 "calendar": ["manage_calendar"],
-                "email": ["mcp__email__list_emails", "mcp__email__read_email", "mcp__email__send_email"],
-                "research": ["web_search"],  # research is a per-request flag, not a tool — closest analog
+                # The full built-in email tool set, in BOTH spellings: the
+                # qualified mcp__email__* names drive MCP schema hiding, the
+                # bare names drive function-schema hiding, and the runtime
+                # gate accepts either — deriving from BUILTIN_EMAIL_TOOLS
+                # keeps the toggle covering every tool the email server
+                # exposes instead of a hand-picked subset.
+                "email": sorted(BUILTIN_EMAIL_TOOLS)
+                         + [f"mcp__email__{t}" for t in sorted(BUILTIN_EMAIL_TOOLS)],
+                "research": ["web_search", "web_fetch"],  # research is a per-request flag, not a tool (closest analog)
             }
 
             if action == "list_tools":
@@ -1695,21 +1715,6 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
 
 # ── Cookbook tools ──
 
-# In-process loopback base for agent tools that call Odysseus's own API
-# (cookbook state, model serve, gallery, email, calendar). We ride the
-# per-process internal token so require_admin lets us through. See
-# core/middleware.py. Resolution (override / APP_PORT / 7000) lives in
-# core.constants.internal_api_base().
-_INTERNAL_BASE = internal_api_base()
-
-
-def _internal_headers(owner: Optional[str] = None) -> Dict[str, str]:
-    from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
-    headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
-    if owner:
-        headers["X-Odysseus-Owner"] = owner
-    return headers
-
 
 async def _cookbook_servers() -> Dict[str, Any]:
     """Return the cookbook's configured servers + the currently-selected
@@ -2033,6 +2038,11 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     # sidebar surfaces the session. Raw start works but the agent
     # fumbles the payload + the session doesn't reliably show up.
     ("POST",   "/api/research/start"),
+    # Use web_search — the HTTP search route is UI-shaped and generic
+    # app_api calls can return empty/poorly formatted results compared with the
+    # named tool's source-aware output.
+    ("GET",    "/api/search"),
+    ("POST",   "/api/search"),
     # Use the named tools — they handle owner attribution, natural-
     # language due_date parsing, timezone, dedup, and tag/category
     # normalization. Hitting the raw endpoint via app_api saves a
@@ -2146,6 +2156,8 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
             return {"error": "Don't POST /api/model/serve directly — use the `serve_model` or `serve_preset` tool (handles host resolution, env_prefix, and cookbook tracking).", "exit_code": 1}
         if "/api/research/start" in path:
             return {"error": "Don't POST /api/research/start directly — use the `trigger_research` tool (it surfaces the session in the Deep Research sidebar).", "exit_code": 1}
+        if "/api/search" in path:
+            return {"error": "Don't hit /api/search via app_api — use the `web_search` tool for online lookups, or `web_fetch` for a specific URL.", "exit_code": 1}
         if "/api/notes" in path:
             return {"error": "Don't hit /api/notes via app_api — use the `manage_notes` tool. It accepts natural-language due_date ('11pm today', 'tomorrow at 9am'), fires reminders from the due_date itself (no separate calendar event), and uses the caller's timezone. The raw endpoint requires ISO-UTC + a separate calendar event, both of which the agent tends to get wrong.", "exit_code": 1}
         if "/api/calendar/events" in path:
@@ -2182,6 +2194,7 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
                 "status_code": resp.status_code,
                 "body": preview,
                 "exit_code": 1,
+                "untrusted_content": True,
             }
         return {
             "output": f"{method} {path} -> {resp.status_code}\n{preview}",

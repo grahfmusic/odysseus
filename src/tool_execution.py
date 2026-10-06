@@ -409,7 +409,7 @@ def _resolve_tool_path(raw_path: str) -> str:
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
-    if _is_app_state_path(resolved):
+    if _is_app_state_path(resolved) and not _is_managed_ssh_path(resolved):
         raise ValueError(
             f"path '{raw_path}' is inside the application state directory"
         )
@@ -450,7 +450,7 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
-    if _is_app_state_path(resolved):
+    if _is_app_state_path(resolved) and not _is_managed_ssh_path(resolved):
         raise ValueError(
             f"path '{raw_path}' is inside the application state directory"
         )

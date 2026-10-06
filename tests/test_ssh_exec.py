@@ -48,7 +48,7 @@ def _block(tool, content):
 
 @pytest.mark.asyncio
 async def test_ssh_exec_non_admin_allowed_own_server(monkeypatch):
-    from src.tool_execution import execute_tool_block
+    from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
     from src import ssh_remote
 
     async def _no_admin(owner):
@@ -66,6 +66,7 @@ async def test_ssh_exec_non_admin_allowed_own_server(monkeypatch):
     desc, result = await execute_tool_block(
         _block("ssh_exec", json.dumps({"server": "home", "cmd": "uptime"})),
         owner="bob",
+        security_context=NO_TOOL_SECURITY_CONTEXT,
     )
     assert desc == "ssh_exec"
     assert result["exit_code"] == 0
@@ -76,7 +77,7 @@ async def test_ssh_exec_non_admin_allowed_own_server(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ssh_exec_unknown_server_errors(monkeypatch):
-    from src.tool_execution import execute_tool_block
+    from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
     from src import ssh_remote
 
     async def _no_admin(owner):
@@ -92,6 +93,7 @@ async def test_ssh_exec_unknown_server_errors(monkeypatch):
     _, result = await execute_tool_block(
         _block("ssh_exec", json.dumps({"server": "nope", "cmd": "uptime"})),
         owner="bob",
+        security_context=NO_TOOL_SECURITY_CONTEXT,
     )
     assert result["exit_code"] == 1
     assert "nope" in result["error"]
@@ -99,7 +101,7 @@ async def test_ssh_exec_unknown_server_errors(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_list_ssh_servers_dispatch(monkeypatch):
-    from src.tool_execution import execute_tool_block
+    from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
     from src import ssh_remote
 
     async def _no_admin(owner):
@@ -108,7 +110,8 @@ async def test_list_ssh_servers_dispatch(monkeypatch):
     monkeypatch.setattr("src.tool_execution._owner_is_admin", _no_admin)
     monkeypatch.setattr("src.tool_security.owner_is_admin_or_single_user", _no_admin)
     monkeypatch.setattr(ssh_remote, "list_servers", lambda owner: [])
-    _, result = await execute_tool_block(_block("list_ssh_servers", ""), owner="bob")
+    _, result = await execute_tool_block(_block("list_ssh_servers", ""), owner="bob",
+        security_context=NO_TOOL_SECURITY_CONTEXT)
     assert result["exit_code"] == 0
 
 
