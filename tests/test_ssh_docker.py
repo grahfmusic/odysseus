@@ -14,7 +14,7 @@ def test_ssh_volume_mounted_in_compose_files():
     for name in ("docker-compose.yml", "docker-compose.gpu-nvidia.yml",
                  "docker-compose.gpu-amd.yml"):
         text = (ROOT / name).read_text()
-        assert "./data/ssh:/app/.ssh" in text or "${APP_DATA_DIR:-./data}/ssh:/app/.ssh" in text, name
+        assert "${APP_DATA_DIR:-./data}/ssh:/app/.ssh:z" in text, name
 
 
 def test_entrypoint_ensures_ssh_dir():

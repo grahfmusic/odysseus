@@ -81,11 +81,22 @@ _register(
         "list_models",
         "list_serve_presets",
         "list_served_models",
+        "list_ssh_servers",
     },
     ToolEffect.READ_PRIVATE,
     # These readers return provider-controlled model identifiers or durable
     # user/admin-authored Cookbook and process state.  Local brokering does not
     # make the returned text server-authored.
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_register(
+    {"ssh_exec"},
+    ToolEffect.EXECUTE_CODE,
+    ToolEffect.EXTERNAL_SIDE_EFFECT,
+    # Runs arbitrary commands on the caller's saved remote host as their own
+    # login user, and returns remote-controlled stdout/stderr.  Saved-server
+    # scoping bounds the destination, but the effects are still code execution
+    # with outside-world side effects, and every result must be treated as data.
     result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(

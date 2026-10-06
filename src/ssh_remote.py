@@ -77,7 +77,7 @@ def generate_user_key(owner: str, force: bool = False) -> Dict[str, str]:
     if not ssh_keygen:
         raise RuntimeError("ssh-keygen not found — install openssh-client")
     if paths["private"].exists():
-        bak = paths["private"].with_suffix(".ed25519.bak")
+        bak = paths["private"].with_name(paths["private"].name + ".bak")
         paths["private"].replace(bak)
         if paths["public"].exists():
             paths["public"].replace(paths["public"].with_suffix(".pub.bak"))
@@ -113,6 +113,26 @@ def validate_port(port: Any) -> int:
     if not _SSH_PORT_RE.fullmatch(s) or not (1 <= int(s) <= 65535):
         raise ValueError("Invalid ssh_port")
     return int(s)
+
+
+def _split_user_host(host: str, username: str = "") -> tuple[str, str]:
+    """Split an optional user@ prefix out of the host field.
+
+    The Host field accepts a bare host or user@host (the UI/API also has a
+    separate Username field). Returns (bare_host, effective_username). A
+    conflicting explicit Username is rejected instead of silently preferred:
+    storing "alice@a" + Username "bob" would build "bob@alice@a", which can
+    never connect and poisons the pinned known_hosts line.
+    """
+    remote = validate_host(host)
+    username = str(username or "")
+    user, sep, bare = remote.rpartition("@")
+    if not sep:
+        return remote, username.strip()
+    explicit = username.strip()
+    if explicit and explicit != user:
+        raise ValueError("specify the login user in Host or Username, not both")
+    return bare, user
 
 
 def _host_allowed(remote: str, port: int) -> bool:
@@ -232,15 +252,15 @@ def create_server(owner: str, *, label: str, host: str, port: Any = 22,
     label = (label or "").strip()
     if not label:
         raise ValueError("label is required")
-    remote = validate_host(host)
+    bare_host, eff_user = _split_user_host(host, username)
     port_n = validate_port(port)
-    _require_allowed(remote, port_n)
+    _require_allowed(f"{eff_user}@{bare_host}" if eff_user else bare_host, port_n)
     if auth_type not in ("key", "password", "both"):
         raise ValueError("auth_type must be key, password, or both")
     with _session() as db:
         row = SshServer(
             id=uuid.uuid4().hex[:12], owner=owner, label=label,
-            host=remote, port=port_n, username=(username or "").strip(),
+            host=bare_host, port=port_n, username=eff_user,
             auth_type=auth_type,
             password=password or None, sudo_password=sudo_password or None,
             ssh_key_ref=user_key_paths(owner)["private"].name,
@@ -260,18 +280,22 @@ def update_server(owner: str, server_id: str, **fields: Any) -> Dict[str, Any]:
             if not label:
                 raise ValueError("label is required")
             row.label = label
-        if "host" in fields and fields["host"] is not None:
-            row.host = validate_host(fields["host"])
         if "port" in fields and fields["port"] is not None:
             row.port = validate_port(fields["port"])
-        _require_allowed(row.host, int(row.port))
-        if "username" in fields and fields["username"] is not None:
-            row.username = str(fields["username"]).strip()
+        host_given = "host" in fields and fields["host"] is not None
+        user_given = "username" in fields and fields["username"] is not None
+        if host_given or user_given:
+            raw_host = fields["host"] if host_given else row.host
+            raw_user = fields["username"] if user_given else (row.username or "")
+            row.host, row.username = _split_user_host(raw_host, raw_user)
+        gate = f"{row.username}@{row.host}" if row.username else row.host
+        _require_allowed(gate, int(row.port))
         if "auth_type" in fields and fields["auth_type"] is not None:
             if fields["auth_type"] not in ("key", "password", "both"):
                 raise ValueError("auth_type must be key, password, or both")
             row.auth_type = fields["auth_type"]
-        # Empty string = leave unchanged; non-empty = replace; explicit None = clear.
+        # Empty string and None both leave a secret unchanged (PATCH sends every
+        # field, so None must NOT wipe); only a non-empty value replaces.
         if "password" in fields and fields["password"]:
             row.password = fields["password"]
         if "sudo_password" in fields and fields["sudo_password"]:
@@ -302,7 +326,6 @@ def audit(owner: str, server_id: str, event: str, command: str, exit_code: int) 
     digest = hashlib.sha256((command or "").encode("utf-8")).hexdigest() if command else None
     try:
         with _session() as db:
-            from core.database import SshAuditLog as _M  # noqa: F401 (kept explicit)
             db.add(SshAuditLog(
                 id=uuid.uuid4().hex[:12], owner=owner, server_id=server_id,
                 event=event, command_hash=digest, exit_code=exit_code,
@@ -368,6 +391,9 @@ def test_connection(owner: str, ref: str) -> Dict[str, Any]:
     _require_allowed(remote, int(srv["port"]))
     if srv["auth_type"] != "key":
         return {"ok": False, "error": "password auth arrives in Phase 2 — use key auth for now", "exit_code": 1}
+    if not user_key_paths(owner)["private"].exists():
+        audit(owner, srv["id"], "test", "", 1)
+        return {"ok": False, "error": "no SSH key for this user — generate one first", "exit_code": 1}
     try:
         scanned = capture_host_key(srv["host"], int(srv["port"]))
     except Exception as exc:

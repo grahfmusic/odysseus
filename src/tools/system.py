@@ -585,6 +585,20 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
 )
 
 
+# SSH exec/upload/terminal must go through the named ssh_exec tool (which
+# wraps remote output per prompt-security). Reachable via app_api: GET
+# list/detail/pubkey + POST test. Everything else under /api/ssh is refused.
+def _ssh_app_api_blocked(method: str, path: str) -> bool:
+    """True when an /api/ssh/* call must not go through the generic loopback."""
+    if not path.startswith("/api/ssh/"):
+        return False
+    if method == "GET":
+        return False
+    if method == "POST" and path.rstrip("/").endswith("/test"):
+        return False
+    return True
+
+
 async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
     """Generic loopback to allowed internal Odysseus API endpoints. Lets the
     agent reach the full UI-button surface (cookbook, email, notes,
@@ -641,6 +655,8 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
                     continue
                 if any(method.upper() == m and path.startswith(p) for m, p in _APP_API_BLOCKLIST_METHOD_PATH):
                     continue
+                if _ssh_app_api_blocked(method.upper(), path):
+                    continue
                 summary = (op or {}).get("summary") or (op or {}).get("description") or ""
                 if isinstance(summary, str):
                     summary = summary.strip().split("\n")[0][:140]
@@ -672,6 +688,8 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
     method = (args.get("method") or "GET").upper()
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         return {"error": f"Unsupported method: {method}", "exit_code": 1}
+    if _ssh_app_api_blocked(method, path):
+        return {"error": "Don't hit SSH exec/upload/terminal paths via app_api — use the `ssh_exec` tool (it resolves the saved server and wraps remote output safely). Listing servers and Test are fine via app_api.", "exit_code": 1}
     if any(method == m and path.startswith(p) for m, p in _APP_API_BLOCKLIST_METHOD_PATH):
         if "/api/email/accounts" in path:
             return {"error": "Don't use /api/email/accounts via app_api — it is owner-filtered in tool context and may return empty. Use the `list_email_accounts` email tool, then pass `account` to list_emails/read_email.", "exit_code": 1}

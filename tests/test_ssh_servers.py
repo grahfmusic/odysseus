@@ -183,3 +183,71 @@ class TestLiveSsh:
             row.host_key_fingerprint = "SHA256:bogus"
         changed = ssh_remote.test_connection(owner, srv["id"])
         assert changed["ok"] is False and "CHANGED" in changed["error"]
+
+
+class TestHostNormalization:
+    """user@host in the Host field must split cleanly (review F1)."""
+
+    def test_user_prefix_split_on_create(self, ssh_db):
+        s = ssh_remote.create_server("alice", label="H", host="deploy@db", username="")
+        assert s["host"] == "db"
+        assert ssh_remote.resolve_server("alice", s["id"])["username"] == "deploy"
+
+    def test_matching_explicit_user_accepted(self, ssh_db):
+        s = ssh_remote.create_server("alice", label="H", host="deploy@db", username="deploy")
+        assert s["host"] == "db"
+        assert ssh_remote.resolve_server("alice", s["id"])["username"] == "deploy"
+
+    def test_conflicting_user_rejected(self, ssh_db):
+        with pytest.raises(ValueError, match="not both"):
+            ssh_remote.create_server("alice", label="H", host="a@db", username="b")
+
+    def test_update_host_normalizes(self, ssh_db):
+        s = ssh_remote.create_server("alice", label="H", host="h")
+        u = ssh_remote.update_server("alice", s["id"], host="ops@h2")
+        assert u["host"] == "h2" and u["username"] == "ops"
+
+    def test_update_conflicting_user_rejected(self, ssh_db):
+        s = ssh_remote.create_server("alice", label="H", host="h", username="a")
+        with pytest.raises(ValueError, match="not both"):
+            ssh_remote.update_server("alice", s["id"], host="b@h2")
+
+    def test_test_fails_fast_without_key(self, ssh_db):
+        s = ssh_remote.create_server("alice", label="H", host="h", username="a")
+        res = ssh_remote.test_connection("alice", s["id"])
+        assert res["ok"] is False and "generate one first" in res["error"]
+
+
+class TestKeyRotationName:
+    """Rotation backup must keep the managed-path shape (review F2)."""
+
+    def test_bak_appends_cleanly(self, ssh_db):
+        import shutil
+        if not shutil.which("ssh-keygen"):
+            pytest.skip("ssh-keygen not available")
+        from src.tool_execution import _is_managed_ssh_path
+        first = ssh_remote.generate_user_key("alice")
+        assert first["generated"] is True
+        paths = ssh_remote.user_key_paths("alice")
+        second = ssh_remote.generate_user_key("alice", force=True)
+        assert second["generated"] is True
+        bak = paths["private"].with_name(paths["private"].name + ".bak")
+        assert bak.exists()
+        assert _is_managed_ssh_path(str(bak)) is True
+
+
+class TestTraversalSplit:
+    """Exact-path file access is allowed; traversal/listing stays denied (review)."""
+
+    def test_resolve_allowed_traversal_denied(self, ssh_db, tmp_path):
+        from src.tool_execution import (
+            _can_traverse_tool_path,
+            _is_denied_tool_path,
+            _resolve_tool_path,
+        )
+        key = tmp_path / "ssh" / "alice_ed25519"
+        key.parent.mkdir(parents=True, exist_ok=True)
+        key.write_text("x")
+        assert _resolve_tool_path(str(key)) == str(key)
+        assert _is_denied_tool_path(str(key.parent)) is True
+        assert _can_traverse_tool_path(str(key.parent)) is False
